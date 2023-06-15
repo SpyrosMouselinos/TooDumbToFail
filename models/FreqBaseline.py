@@ -115,11 +115,13 @@ class FreqMCVQABaseline:
 class VideoFreqMCVQABaseline:
     """Multiple-Choice vQA Model (Frequency Baseline with Video Assistance)"""
 
-    def __init__(self, db_dict: Dict[str, Any], video_extractor: str = 'VideoMae'):
-        self.answer_db = self.build_video_answer_db(db_dict)
-        self.video_extractor = video_extractor
+    def __init__(self, train_dataset):
+        self.video_emb_answer_db = self.build_video_answer_db(train_dataset)
 
-    def build_video_answer_db(self, db_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def maybebuild(self, dataset, cache):
+        return
+
+    def build_video_answer_db(self, dataset) -> Dict[str, Any]:
         """Builds a Video Embedding - Answer database.
 
         Returns a dictionary where the key is the question string and the value
@@ -127,8 +129,7 @@ class VideoFreqMCVQABaseline:
         instance of the question.
 
         Args:
-            db_dict (Dict): Dictionary containing the database of
-                questions and corresponding answers.
+            dataset (PerceptionDataset): A dataset generator that provides video embeddings, questions and answers
 
         Returns:
             Dict[str, Any]: Dictionary where the key is question string and
@@ -136,14 +137,16 @@ class VideoFreqMCVQABaseline:
             was asked in the db_dict.
         """
         question_db = {}
-        for vid in db_dict.values():
-            for question in vid['mc_question']:
+        for entry in dataset:
+            for question in entry['mc_question']:
                 try:
                     question_db[question['question']]
                 except KeyError:
-                    question_db[question['question']] = []
+                    question_db[question['question']] = {'video_emb': [], 'answer': []}
 
                 answer = question['options'][question['answer_id']]
-                question_db[question['question']].append(answer)
+                video_emb = entry['frames'].cpu()
+                question_db[question['question']]['video_emb'].append(video_emb)
+                question_db[question['question']]['answer'].append(answer)
 
         return question_db

@@ -217,13 +217,12 @@ def get_video_frames(data_item: Dict[str, Any],
 
     if override_video_name:
         video_file = os.path.join(video_folder_path,
-                                  'video_10993') + '.mp4'
+                                  'video_1580') + '.mp4'
     else:
         video_file = os.path.join(video_folder_path,
                                   data_item['metadata']['video_id']) + '.mp4'
 
     vid_frames = load_mp4_to_frames(video_file, resize_to=resize_to)
-    vid_frames = np.moveaxis(vid_frames, 3, 1)
     if not override_video_name:
         assert data_item['metadata']['num_frames'] == vid_frames.shape[0]
     return vid_frames
@@ -243,12 +242,13 @@ def video_temporal_subsample(
     for i in range(n_segments):
         indices = np.linspace(i * (t // n_segments), (i + 1) * ((t // n_segments) - 1), num_samples)
         indices = np.clip(indices, i * (t // n_segments), (i + 1) * ((t // n_segments) - 1)).astype(int)
-        parts.append(np.take(x, indices, axis=temporal_dim))
+        for f in np.take(x, indices, axis=temporal_dim).astype('uint8'):
+            parts.append(f)
     return parts
 
 
 def test_video(valid_db_dict, video_id='video_8241'):
-    video_path = './data/videos/'
+    video_path = 'data/sample/videos/'
     video_item = valid_db_dict[video_id]
     video_path = os.path.join(video_path,
                               video_item['metadata']['video_id']) + '.mp4'
@@ -309,7 +309,8 @@ def calc_top1(answers_dict: Dict[str, Any],
             try:
                 ground_truth = db_dict[vid_id]['mc_question'][question_idx]
             except KeyError as exc:
-                raise KeyError('Unexpected question ID in answer.') from exc
+                print(f'Unexpected question ID in {vid_id}.')
+                continue
 
             if answer_id > 2 or answer_id < 0:
                 raise ValueError(f'Answer ID must be in range [0:2], got {answer_id}.')
@@ -390,26 +391,28 @@ def analyse_test_results(results, category='8'):
 
 
 def test_download_samples():
-    sample_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_annotations.zip'
-    download_and_unzip(sample_annot_url, data_path)
-    sample_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_videos.zip'
-    download_and_unzip(sample_videos_url, data_path)
-    sample_audios_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_audios.zip'
-    download_and_unzip(sample_audios_url, data_path)
-
-    # validation set annotations to perform tracking
-    valid_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/mc_question_valid_annotations.zip'
-    download_and_unzip(valid_annot_url, data_path)
-    # validation set annotations to perform tracking
-    train_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/mc_question_train_annotations.zip'
-    download_and_unzip(train_annot_url, data_path)
+    # sample_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_annotations.zip'
+    # download_and_unzip(sample_annot_url, data_path)
+    # sample_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_videos.zip'
+    # download_and_unzip(sample_videos_url, data_path)
+    # sample_audios_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_audios.zip'
+    # download_and_unzip(sample_audios_url, data_path)
+    #
+    # # validation set annotations to perform tracking
+    # valid_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/mc_question_valid_annotations.zip'
+    # download_and_unzip(valid_annot_url, data_path)
+    # # validation set annotations to perform tracking
+    # train_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/mc_question_train_annotations.zip'
+    # download_and_unzip(train_annot_url, data_path)
 
     # validation videos not downloaded because they are too big (approx 70GB).
     # not needed for this baseline since we are choosing answers based on the
     # frequency of oocurence we do not actually need the videos to calculate
     # the performance.
-    # valid_videos_url =
-    # 'https://storage.googleapis.com/dm-perception-test/zip_data/valid_videos.zip'
+
+    #train_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/train_videos.zip'
+    #download_and_unzip(train_videos_url, data_path + '/train')
+    # valid_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/valid_videos.zip'
     # download_and_unzip(valid_videos_url, data_path)
 
 

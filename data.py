@@ -4,6 +4,7 @@ from transformers import AutoImageProcessor, TimesformerForVideoClassification, 
     VideoMAEImageProcessor
 import numpy as np
 import torch
+import torch.nn as nn
 
 
 class PerceptionDataset:
@@ -35,6 +36,8 @@ class PerceptionDataset:
         self.pt_db_list = self.load_dataset(pt_db_dict)
         self.processor = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
         self.model = VideoMAEForVideoClassification.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
+        self.model.classifier = nn.Identity()
+        self.model = self.model.to('cuda').half()
 
     def load_dataset(self, pt_db_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Loads the dataset from the annotation file and processes.
@@ -93,18 +96,34 @@ class PerceptionDataset:
         if self.js_only:
             vid_frames = np.zeros((metadata['num_frames'], 1, 1, 1))
         else:
-            # vid_frames = get_video_frames(data_item, self.video_folder, override_video_name=True, resize_to=224)
+            N_SEGMENTS = 1
+            BATCH_SIZE = 16
+            vid_frames = get_video_frames(data_item, self.video_folder, override_video_name=True, resize_to=224)
+            vid_frames = video_temporal_subsample(x=vid_frames, num_samples=16, n_segments=N_SEGMENTS)
 
-            vid_frames = video_temporal_subsample(x=vid_frames, num_samples=16)[0].astype('uint8')
-            inputs = self.processor(list(vid_frames), return_tensors="pt")
-
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                logits = outputs.logits
-
-            predicted_class_idx = logits.argmax(-1).item()
-            print("Predicted class:", self.model.config.id2label[predicted_class_idx])
-
+            inputs = self.processor(vid_frames, return_tensors="pt")
+            inputs['pixel_values'] = inputs['pixel_values'].resize(N_SEGMENTS, 16, inputs['pixel_values'].size()[2],
+                                                                   inputs['pixel_values'].size()[3],
+                                                                   inputs['pixel_values'].size()[4])
+            final_logits = []
+            if N_SEGMENTS >= BATCH_SIZE:
+                for i in range(N_SEGMENTS // BATCH_SIZE):
+                    semi_input = inputs['pixel_values'][i * BATCH_SIZE: (i + 1) * BATCH_SIZE].to('cuda')
+                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                        with torch.no_grad():
+                            outputs = self.model(pixel_values=semi_input)
+                            logits = outputs.logits
+                            for f in logits:
+                                final_logits.append(f)
+            else:
+                semi_input = inputs['pixel_values'].to('cuda')
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    with torch.no_grad():
+                        outputs = self.model(pixel_values=semi_input)
+                        logits = outputs.logits
+                        for f in logits:
+                            final_logits.append(f)
+            vid_frames = torch.stack(final_logits, dim=0).mean(0)
         return {'metadata': metadata,
                 self.task: annot,
                 'frames': vid_frames}
@@ -116,7 +135,7 @@ def test_dataset_with_json_only():
            'split': 'valid',
            'js_only': True}
 
-    valid_db_path = './data/mc_question_valid.json'
+    valid_db_path = 'data/sample/mc_question_valid.json'
     valid_db_dict = load_db_json(valid_db_path)
     dataset = PerceptionDataset(valid_db_dict, **cfg)
     for item in dataset:
@@ -130,7 +149,7 @@ def test_dataset_with_video():
            'split': 'valid',
            'js_only': False}
 
-    valid_db_path = './data/mc_question_valid.json'
+    valid_db_path = 'data/sample/mc_question_valid.json'
     valid_db_dict = load_db_json(valid_db_path)
     dataset = PerceptionDataset(valid_db_dict, **cfg)
     for item in dataset:

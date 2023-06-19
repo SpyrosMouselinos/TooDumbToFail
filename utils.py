@@ -22,11 +22,17 @@ import json
 import os
 import random
 import zipfile
+
+import av
 import cv2
 import moviepy.editor as mvp
 import numpy as np
 import requests
 from typing import Dict, Any
+import decord as de
+
+ctx = de.cpu(0)
+
 # from data import PerceptionDataset
 from models.FreqBaseline import FreqMCVQABaseline
 
@@ -82,6 +88,8 @@ TAG_AREA = {
 
 CAT = AREA + REASONING + TAG
 DATA_PATH = data_path = './data/'
+TRAIN_DATA_PATH = train_data_path = DATA_PATH + 'train/'
+VALID_DATA_PATH = valid_data_path = DATA_PATH + 'valid/'
 
 
 def download_and_unzip(url: str, destination: str):
@@ -161,7 +169,7 @@ def load_db_json(db_file: str) -> Dict[str, Any]:
         return db_file_dict
 
 
-def load_mp4_to_frames(filename: str, resize_to=None) -> np.array:
+def load_mp4_to_frames(filename: str, indices=None, resize_to=None) -> np.array:
     """Loads an MP4 video file and returns its frames as a NumPy array.
 
     Args:
@@ -170,38 +178,17 @@ def load_mp4_to_frames(filename: str, resize_to=None) -> np.array:
     Returns:
       np.array: Frames of the video as a NumPy array.
     """
-    assert os.path.exists(filename), f'File {filename} does not exist.'
-    cap = cv2.VideoCapture(filename)
 
-    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if resize_to is None:
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    else:
-        height = resize_to
-        width = resize_to
-
-    vid_frames = np.empty((num_frames, height, width, 3), dtype=np.uint8)
-
-    idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if resize_to is not None:
-            frame = cv2.resize(frame, (height, width), interpolation=cv2.INTER_AREA)
-
-        vid_frames[idx] = frame
-        idx += 1
-
-    cap.release()
-    return vid_frames
+    vr = de.VideoReader(filename, ctx=ctx, width=resize_to, height=resize_to)
+    if indices is None:
+        indices = list(range(len(vr)))
+    frames = vr.get_batch(indices).asnumpy()
+    return frames
 
 
 def get_video_frames(data_item: Dict[str, Any],
                      video_folder_path: str,
-                     override_video_name: bool = False, resize_to=None) -> np.array:
+                     override_video_name: bool = False, resize_to=None, num_samples=16, n_segments=1) -> np.array:
     """Loads frames of a video specified by an item dictionary.
 
     Assumes format of annotations used in the Perception Test Dataset.
@@ -222,29 +209,34 @@ def get_video_frames(data_item: Dict[str, Any],
         video_file = os.path.join(video_folder_path,
                                   data_item['metadata']['video_id']) + '.mp4'
 
-    vid_frames = load_mp4_to_frames(video_file, resize_to=resize_to)
-    if not override_video_name:
-        assert data_item['metadata']['num_frames'] == vid_frames.shape[0]
-    return vid_frames
-
-
-def video_temporal_subsample(
-        x: np.ndarray, num_samples: int, temporal_dim: int = 0, n_segments: int = 1):
-    """
-    Uniformly subsamples num_samples indices from the temporal dimension of the video.
-    Returns:
-        An x-like with subsampled temporal dimension.
-    """
-    t = x.shape[temporal_dim]
-    assert num_samples > 0 and t > 0
-    # Sample by nearest neighbor interpolation if num_samples > t.
     parts = []
+    t = data_item['metadata']['num_frames']
+    assert num_samples > 0 and t > 0
+    vr = de.VideoReader(video_file, ctx=ctx, width=resize_to, height=resize_to)
     for i in range(n_segments):
-        indices = np.linspace(i * (t // n_segments), (i + 1) * ((t // n_segments) - 1), num_samples)
-        indices = np.clip(indices, i * (t // n_segments), (i + 1) * ((t // n_segments) - 1)).astype(int)
-        for f in np.take(x, indices, axis=temporal_dim).astype('uint8'):
-            parts.append(f)
+        indices = np.linspace(i * (t // n_segments), (i + 1) * ((t // n_segments) - 2), num_samples)
+        indices = np.clip(indices, i * (t // n_segments), (i + 1) * ((t // n_segments) - 2)).astype(int)
+        parts.append(vr.get_batch(indices).asnumpy())
     return parts
+
+
+# def video_temporal_subsample(
+#         x: np.ndarray, num_samples: int, temporal_dim: int = 0, n_segments: int = 1):
+#     """
+#     Uniformly subsamples num_samples indices from the temporal dimension of the video.
+#     Returns:
+#         An x-like with subsampled temporal dimension.
+#     """
+#     t = x.shape[temporal_dim]
+#     assert num_samples > 0 and t > 0
+#     # Sample by nearest neighbor interpolation if num_samples > t.
+#     parts = []
+#     for i in range(n_segments):
+#         indices = np.linspace(i * (t // n_segments), (i + 1) * ((t // n_segments) - 1), num_samples)
+#         indices = np.clip(indices, i * (t // n_segments), (i + 1) * ((t // n_segments) - 1)).astype(int)
+#         for f in np.take(x, indices, axis=temporal_dim).astype('uint8'):
+#             parts.append(f)
+#     return parts
 
 
 def test_video(valid_db_dict, video_id='video_8241'):
@@ -391,29 +383,26 @@ def analyse_test_results(results, category='8'):
 
 
 def test_download_samples():
-    # sample_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_annotations.zip'
-    # download_and_unzip(sample_annot_url, data_path)
-    # sample_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_videos.zip'
-    # download_and_unzip(sample_videos_url, data_path)
-    # sample_audios_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_audios.zip'
-    # download_and_unzip(sample_audios_url, data_path)
-    #
-    # # validation set annotations to perform tracking
-    # valid_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/mc_question_valid_annotations.zip'
-    # download_and_unzip(valid_annot_url, data_path)
-    # # validation set annotations to perform tracking
-    # train_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/mc_question_train_annotations.zip'
-    # download_and_unzip(train_annot_url, data_path)
+    sample_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_annotations.zip'
+    download_and_unzip(sample_annot_url, data_path)
+    sample_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_videos.zip'
+    download_and_unzip(sample_videos_url, data_path)
+    sample_audios_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_audios.zip'
+    download_and_unzip(sample_audios_url, data_path)
+
+    # validation set annotations to perform tracking
+    valid_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/mc_question_valid_annotations.zip'
+    download_and_unzip(valid_annot_url, data_path)
+    # validation set annotations to perform tracking
+    train_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/mc_question_train_annotations.zip'
+    download_and_unzip(train_annot_url, data_path)
 
     # validation videos not downloaded because they are too big (approx 70GB).
     # not needed for this baseline since we are choosing answers based on the
     # frequency of oocurence we do not actually need the videos to calculate
     # the performance.
 
-    #train_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/train_videos.zip'
-    #download_and_unzip(train_videos_url, data_path + '/train')
+    train_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/train_videos.zip'
+    download_and_unzip(train_videos_url, data_path + '/train')
     # valid_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/valid_videos.zip'
     # download_and_unzip(valid_videos_url, data_path)
-
-
-

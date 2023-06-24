@@ -210,9 +210,8 @@ def get_video_frames(data_item: Dict[str, Any],
                                   data_item['metadata']['video_id']) + '.mp4'
 
     parts = []
-    t = data_item['metadata']['num_frames']
-    assert num_samples > 0 and t > 0
     vr = de.VideoReader(video_file, ctx=ctx, width=resize_to, height=resize_to)
+    t = len(vr)
     for i in range(n_segments):
         indices = np.linspace(i * (t // n_segments), (i + 1) * ((t // n_segments) - 2), num_samples)
         indices = np.clip(indices, i * (t // n_segments), (i + 1) * ((t // n_segments) - 2)).astype(int)
@@ -265,16 +264,16 @@ def test_video(valid_db_dict, video_id='video_8241'):
             print('---------------------------------')
 
 
-def calc_top1(answers_dict: Dict[str, Any],
-              db_dict: Dict[str, Any]) -> float:
-    """Calculates the top-1 accuracy and results for each category.
+def calc_top(answers_dict: Dict[str, Any],
+             db_dict: Dict[str, Any], k=1) -> float:
+    """Calculates the top-k accuracy and results for each category.
 
     Args:
       answers_dict (Dict): Dictionary containing the answers.
       db_dict (Dict): Dictionary containing the database.
 
     Returns:
-      float: Top-1 accuracy.
+      float: Top-k accuracy.
 
     Raises:
       KeyError: Raises error if the results contain a question ID that does not
@@ -303,14 +302,19 @@ def calc_top1(answers_dict: Dict[str, Any],
             except KeyError as exc:
                 print(f'Unexpected question ID in {vid_id}.')
                 continue
-
-            if answer_id > 2 or answer_id < 0:
+            if not isinstance(answer_id, list):
+                answer_id = [answer_id]
+            if any(f > 2 or f < 0 for f in answer_id):
                 raise ValueError(f'Answer ID must be in range [0:2], got {answer_id}.')
-            if ground_truth['options'][answer_id] != answer_info['answer']:
-                raise ValueError('Answer text is not as expected.')
+            # if ground_truth['options'][answer_id] != answer_info['answer']:
+            #     raise ValueError('Answer text is not as expected.')
 
             gt_answer_id = ground_truth['answer_id']
-            val = int(gt_answer_id == answer_id)
+            ### Here is where Magic Happens ###
+            if k == 1:
+                val = int(gt_answer_id == answer_id[0])
+            else:
+                val = int(any(f == gt_answer_id for f in answer_id))
             total_correct += val
             total += 1
 
@@ -320,16 +324,16 @@ def calc_top1(answers_dict: Dict[str, Any],
     return total_correct / total
 
 
-def calc_top1_by_cat(answers_dict: Dict[str, Any],
-                     db_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Calculates the top-1 accuracy and results for each category.
+def calc_top_by_cat(answers_dict: Dict[str, Any],
+                    db_dict: Dict[str, Any], k=1) -> Dict[str, Any]:
+    """Calculates the top-k accuracy and results for each category.
 
     Args:
       answers_dict (Dict): Dictionary containing the answers.
       db_dict (Dict): Dictionary containing the database.
 
     Returns:
-      Dict: Top-1 accuracy and results for each category.
+      Dict: Top-k accuracy and results for each category.
     """
     results_dict = {k: v for k, v in zip(CAT, np.zeros((len(CAT), 2)))}
 

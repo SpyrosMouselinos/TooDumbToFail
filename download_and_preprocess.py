@@ -16,12 +16,12 @@ from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
 # Constants
 
 
-train_db_path = 'data/mc_question_train.json'
+train_db_path = 'data/mc_question_valid.json'
 pt_db_dict = load_db_json(train_db_path)
 
-video_folder = './data/train/videos/'
+video_folder = './data/valid/'
 task = 'mc_question'
-split = 'train'
+split = 'valid'
 N_SEGMENTS = 1
 MINI_BATCH_SIZE = 16
 STORE_BATCH_SIZE = 12

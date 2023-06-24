@@ -75,9 +75,12 @@ class PerceptionDataset:
     def _get_video_frames(self, data_item):
         N_SEGMENTS = 1
         BATCH_SIZE = 16
+        loaded_videos = []
         vid_frames = get_video_frames(data_item, self.video_folder, override_video_name=False, resize_to=224, num_samples=16, n_segments=N_SEGMENTS)
-
-        inputs = self.processor(vid_frames, return_tensors="pt")
+        for s in range(N_SEGMENTS):
+            for f in vid_frames[s]:
+                loaded_videos.append(f)
+        inputs = self.processor(loaded_videos, return_tensors="pt")
         inputs['pixel_values'] = inputs['pixel_values'].resize(N_SEGMENTS, 16, inputs['pixel_values'].size()[2],
                                                                inputs['pixel_values'].size()[3],
                                                                inputs['pixel_values'].size()[4])

@@ -10,25 +10,91 @@ import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
 from sentence_transformers import SentenceTransformer
-import re
 from torch.utils.data import Dataset, DataLoader
+from torchmetrics.classification import MulticlassAccuracy
+
+
+def save_checkpoint(state, filename='checkpoint'):
+    torch.save(state, filename + '.pth')
+
+
+class FakeBlock(nn.Module):
+    def __init__(self, in_dim=384, out_dim=None):
+        super().__init__()
+        self.in_dim = in_dim
+        if out_dim is None:
+            out_dim = self.in_dim
+        self.out_dim = out_dim
+
+    def forward(self, input, *args):
+        return torch.randn(size=(input.size(0), self.out_dim), device='cuda')
+
+
+class EncoderBlock(nn.Module):
+    def __init__(self, embed_dim, num_heads, dim_feedforward=None, dropout=0.1):
+        """
+        Args:
+            input_dim: Dimensionality of the input
+            num_heads: Number of heads to use in the attention block
+            dim_feedforward: Dimensionality of the hidden layer in the MLP
+            dropout: Dropout probability to use in the dropout layers
+        """
+        super().__init__()
+
+        # Attention layer
+        self.self_attn = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout,
+                                               batch_first=True,
+                                               device='cuda')
+
+        if dim_feedforward is None:
+            dim_feedforward = 2 * embed_dim
+
+        # Two-layer MLP
+        self.linear_net = nn.Sequential(
+            nn.Linear(embed_dim, dim_feedforward),
+            nn.Dropout(dropout),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim_feedforward, embed_dim),
+        )
+
+        # Layers to apply in between the main layers
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, q, k, v, mask=None):
+        # Attention part
+        attn_out, _ = self.self_attn(query=q, key=k, value=v)
+        q = q + self.dropout(attn_out)
+        q = self.norm1(q)
+
+        # MLP part
+        linear_out = self.linear_net(q)
+        q = q + self.dropout(linear_out)
+        q = self.norm2(q)
+
+        return q
 
 
 class LateEmbFusion2Decision(nn.Module):
-    def __init__(self, v_dim=762, l_dim=762, qa_paired=False, smooth_labels=0.0):
+    def __init__(self, v_dim=768, l_dim=384, qa_paired=False, smooth_labels=0):
         super().__init__()
         self.v_dim = v_dim
         self.q_dim = l_dim
         self.emb_dim = min(self.v_dim, self.q_dim)
         self.qa_paired = qa_paired
-        self.v_block = nn.Sequential(nn.Linear(self.v_dim, self.emb_dim), nn.Dropout(p=0.1))
-        self.q_block = nn.Sequential(nn.Linear(self.q_dim, self.emb_dim), nn.Dropout(p=0.1))
-        self.a_block = nn.Sequential(nn.Linear(self.q_dim, self.emb_dim))
-        coef = 3 if qa_paired else 2
-        self.d_block = nn.Sequential(nn.Linear(self.emb_dim * coef, self.emb_dim), nn.ReLU(),
+        self.v_block = nn.Sequential(FakeBlock(self.v_dim))
+        self.q_block = nn.Sequential(nn.Identity())
+        self.q_block_scale = nn.Sequential(nn.Linear(self.q_dim, self.q_dim))
+        self.q_block_bias = nn.Sequential(nn.Linear(self.q_dim, self.q_dim))
+        self.a_block = nn.Sequential(nn.Identity())
+        coef = 1 if qa_paired else 2
+        heads = 3 if qa_paired else 1
+        self.d_block = nn.Sequential(nn.Linear(2 * self.q_dim, self.emb_dim), nn.ReLU(),
                                      nn.Linear(self.emb_dim, 1))
         self.smooth_labels = smooth_labels
         self.loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=self.smooth_labels)
+        self.metric_fn = MulticlassAccuracy(num_classes=3)
 
     def calc_loss(self, scores, gt):
         """
@@ -39,20 +105,40 @@ class LateEmbFusion2Decision(nn.Module):
         """
         if not isinstance(gt, torch.Tensor):
             gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
         return self.loss_fn(scores, gt)
 
-    def forward(self, v, q, a=None, gt=None):
+    def calc_acc(self, scores, gt):
+        """
+        Calculate Accuracy
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+        return self.metric_fn(scores, gt)
+
+    def forward(self, v, q=None, a=None, gt=None):
         v = self.v_block(v)  # BS, E_DIM
         if self.qa_paired:
-            # The q contains both the question and the answer #
-            assert a is None
-            q = self.q_block(q)  # BS, 3, E_DIM
-
-            v = v.unsqueeze(1).repeat(1, 3, 1)  # BS, 3, E_DIM
-            vq = torch.cat([v, q], dim=2)  # BS, 3, 2 * E_DIM
-            scores = self.d_block(vq)  # BS, 3, 1
+            # The a contains both the question and the answers #
+            q = self.q_block(q)
+            q_emb_s = self.q_block_scale(q)  # BS, E_DIM
+            q_emb_b = self.q_block_bias(q)  # BS, E_DIM
+            # BS, E_DIM
+            q = q.unsqueeze(1).repeat(1, 3, 1)  # BS, 3, E_DIM
+            q_emb_s = q_emb_s.unsqueeze(1).repeat(1, 3, 1)  # BS, 3, E_DIM
+            q_emb_b = q_emb_b.unsqueeze(1).repeat(1, 3, 1)  # BS, 3, E_DIM
+            a = a * q_emb_s  # BS, 3, E_DIM
+            a = a + q_emb_b  # BS, 3, E_DIM
+            va = torch.cat([q, a], dim=2)
+            scores = self.d_block(va)  # BS, 3, 1
             scores = scores.squeeze(2)  # BS, 3
-
         else:
             # The q contains only the question #
             a = self.a_block(a)  # BS, 3, E_DIM
@@ -66,16 +152,95 @@ class LateEmbFusion2Decision(nn.Module):
 
         if gt is not None:
             loss = self.calc_loss(scores, gt)
-            return scores, loss
-        return scores, None
+            metric = self.calc_acc(scores, gt)
+            return scores, loss, metric
+        return scores, None, None
+
+
+class RetrievalAugmentedEmbedding(nn.Module):
+    def __init__(self, v_dim=768, l_dim=384):
+        super().__init__()
+        self.v_dim = v_dim
+        self.q_dim = l_dim
+        self.emb_dim = self.v_dim + self.q_dim
+        self.internal = nn.Linear(self.emb_dim, self.emb_dim)
+        self.v_block = nn.Sequential(self.internal)
+        self.v2_block = nn.Sequential(self.internal, nn.Dropout1d(p=0.1))
+        self.q_block = nn.Sequential(nn.Identity())
+        self.o_block = nn.Sequential(nn.Identity())
+        self.calc_block = EncoderBlock(embed_dim=self.emb_dim, num_heads=12, dropout=0.1)
+        self.transform_block = nn.Sequential(nn.Linear(self.emb_dim, 3))
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.metric_fn = MulticlassAccuracy(num_classes=3)
+
+    def calc_loss(self, scores, gt):
+        """
+        Calculate Cross-Entropy Loss
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+
+        return self.loss_fn(scores, gt)
+
+    def calc_acc(self, scores, gt):
+        """
+        Calculate Accuracy
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+        return self.metric_fn(scores, gt)
+
+    def forward(self, v, q, o, n_ids=None, n_feats=None, n_answ=None,
+                gt_answer_int=None, gt_answer_emb=None):
+        vo = self.v_block(torch.cat([v.unsqueeze(1).repeat(1, 3, 1), o], dim=2))
+        na = self.v2_block(torch.cat([n_feats, n_answ], dim=2))
+        out_1 = self.calc_block(vo, na, na)
+        out_1 = torch.sum(out_1, dim=1).squeeze(1)
+        scores = self.transform_block(out_1)
+
+        if gt_answer_int is not None:
+            loss = self.calc_loss(scores, gt_answer_int)
+            metric = self.calc_acc(scores, gt_answer_int)
+            return scores, loss, metric
+        return scores, None, None
 
 
 class DbDataset(Dataset):
-    def __init__(self, video_emb_answer_db, model_emb):
+    def __init__(self, video_emb_answer_db, model_emb, qa_paired=False):
         self.video_emb_answer_db = video_emb_answer_db
-        self.video_emb_answer_db = self.reorder_db(qa_paired=False)
         self.model_emb = model_emb
+        self.video_emb_answer_db = self.reorder_db(qa_paired=qa_paired)
         return
+
+    @staticmethod
+    def custom_collate_fn(batch):
+        KEYS = batch[0].keys()
+        NEW_BATCH = {k: [] for k in KEYS}
+        for entry in batch:
+            for k, v in entry.items():
+                if isinstance(v, torch.Tensor):
+                    pass
+                elif isinstance(v, list):
+                    v = torch.stack(v, dim=0)
+                elif isinstance(v, int):
+                    v = torch.LongTensor([v])
+                v = v.to('cuda')
+                NEW_BATCH[k].append(v)
+
+        for k in KEYS:
+            NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
+        return NEW_BATCH
 
     def reorder_db(self, qa_paired=False):
         indx = 0
@@ -84,47 +249,160 @@ class DbDataset(Dataset):
             corpus_question = []
             corpus_answer = []
             corpus_options = []
-            for k, v in self.video_emb_answer_db:
-                corpus_question.append(k)
-                corpus_options.append(v['options'])
-                corpus_answer.append(v['answer'])
-
-            emb_question = self.model_emb.encode(corpus_question, batch_size=32,
-                                                 convert_to_tensor=True,
-                                                 device='cuda')
-            emb_options = self.model_emb.encode(corpus_options, batch_size=32,
-                                                convert_to_tensor=True,
-                                                device='cuda')
-            emb_answers = self.model_emb.encode(corpus_answer, batch_size=32,
-                                                convert_to_tensor=True,
-                                                device='cuda')
-            for k, v in self.video_emb_answer_db:
-                video = v['video_emb']
-                db.update({indx: {'v': video, 'q': emb_question[indx],
-                                  'a': [emb_options[indx], emb_options[indx + 1], emb_options[indx + 2]],
-                                  'gt': emb_answers[indx]}})
-                indx += 1
+            for k, v in self.video_emb_answer_db.items():
+                for _ in range(len(v['answer_int'])):
+                    corpus_question.append(k)
+                for ii in v['options']:
+                    for jj in ii:
+                        corpus_options.append(jj)
+                for ii in v['answer_int']:
+                    corpus_answer.append(ii)
         else:
             corpus_question = []
             corpus_answer = []
-            for k, v in self.video_emb_answer_db:
-                corpus_question.append(k + v['options'][0])
-                corpus_question.append(k + v['options'][1])
-                corpus_question.append(k + v['options'][2])
-                corpus_answer.append(v['answer'])
+            corpus_options = []
+            for k, v in self.video_emb_answer_db.items():
+                for _ in range(len(v['answer_int'])):
+                    corpus_question.append(k)
+                for ii in v['options']:
+                    for jj in ii:
+                        corpus_options.append(jj)
+                for ii in v['answer_int']:
+                    corpus_answer.append(ii)
 
-            emb_question = self.model_emb.encode(corpus_question, batch_size=32,
-                                                 convert_to_tensor=True,
-                                                 device='cuda')
-            emb_answers = self.model_emb.encode(corpus_answer, batch_size=32,
-                                                convert_to_tensor=True,
-                                                device='cuda')
-            for k, v in self.video_emb_answer_db:
-                video = v['video_emb']
-                db.update({indx: {'v': video, 'q': [emb_question[indx], emb_question[indx + 1], emb_question[indx + 2]],
-                                  'gt': emb_answers[indx]}})
+        emb_question = self.model_emb.encode(corpus_question, batch_size=32,
+                                             convert_to_tensor=True,
+                                             device='cuda')
+        emb_options = self.model_emb.encode(corpus_options, batch_size=32,
+                                            convert_to_tensor=True,
+                                            device='cuda')
+        for k, v in self.video_emb_answer_db.items():
+            for ii in range(len(v['answer_int'])):
+                video = v['video_emb'][ii].to(device='cuda')
+                db.update({indx: {'v': video, 'q': emb_question[indx],
+                                  'a': [emb_options[indx], emb_options[indx + 1], emb_options[indx + 2]],
+                                  'gt': corpus_answer[indx]}})
                 indx += 1
 
+        return db
+
+    def __len__(self):
+        return len(self.video_emb_answer_db)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+        return self.video_emb_answer_db[idx]
+
+
+class DbLearnDataset(Dataset):
+    def __init__(self, video_emb_answer_db, model_emb):
+        self.video_emb_answer_db = video_emb_answer_db
+        self.model_emb = model_emb
+        print("Reordering DB...\n")
+        self.video_emb_answer_db = self.freq_reorder()
+        return
+
+    @staticmethod
+    def custom_collate_fn(batch):
+        KEYS = batch[0].keys()
+        NEW_BATCH = {k: [] for k in KEYS}
+        for entry in batch:
+            for k, v in entry.items():
+                if isinstance(v, torch.Tensor):
+                    pass
+                elif isinstance(v, list):
+                    if isinstance(v[0], int):
+                        v = torch.LongTensor([v])
+                    else:
+                        v = torch.stack(v, dim=0)
+                elif isinstance(v, int):
+                    v = torch.LongTensor([v])
+                v = v.to('cuda')
+                NEW_BATCH[k].append(v)
+
+        for k in KEYS:
+            NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
+        return NEW_BATCH
+
+    def freq_reorder(self, top_k=25, train=True):
+        idx = 0
+        db = {}
+        # Pre-calc Questions #
+        question_embs = self.model_emb.encode(list(self.video_emb_answer_db.keys()),
+                                              batch_size=32,
+                                              convert_to_tensor=True,
+                                              device='cuda')
+
+        # For each question in the DB #
+        for ij, (question, stored_response) in enumerate(tqdm.tqdm(self.video_emb_answer_db.items())):
+            question_emb = question_embs[ij]
+
+            db_frames = torch.stack(stored_response['video_emb'], dim=0)
+            if len(stored_response['video_emb'][0].size()) == 1:
+                db_frames = torch.stack(stored_response['video_emb'], dim=0)
+            elif len(stored_response['video_emb'][0].size()) == 2:
+                db_frames = torch.cat(stored_response['video_emb'], dim=0)
+
+            # Pre-calc Similarities #
+            db_frames = db_frames.to('cuda')
+            sim_scoress = F.cosine_similarity(db_frames[None, :], db_frames[:, None], dim=-1)
+            sim_scoress = torch.clip(sim_scoress, 0, 1).cpu()
+
+            # For each Video / Answer pair #
+
+            # Pre-cal Answers #
+            answer_embs = self.model_emb.encode(stored_response['answer'],
+                                                batch_size=32,
+                                                convert_to_tensor=True,
+                                                device='cuda')
+            options_emb = self.model_emb.encode([k for f in stored_response['options'] for k in f],
+                                                batch_size=32,
+                                                convert_to_tensor=True,
+                                                device='cuda')
+
+            for jk, (frame, answer_int) in enumerate(
+                    zip(stored_response['video_emb'], stored_response['answer_int'])):
+                sim_scores = sim_scoress[jk]
+                if top_k is None:
+                    top_k = sim_scores.size()[-1]
+                max_item_pos = sim_scores.argmax().item()
+                if train:
+                    top_neighbours = [f.item() for f in sim_scores.argsort()[-(top_k + 1):] if not f == max_item_pos]
+                else:
+                    top_neighbours = [f.item() for f in sim_scores.argsort()[-top_k:]]
+
+                ### Gather Neighbour similarity Tensor ###
+                current_f = frame
+                current_q = question_emb
+                current_o = [options_emb[jk], options_emb[jk + 1], options_emb[jk + 2]]
+
+                neighbour_ids = top_neighbours
+                neighbour_feats = db_frames[top_neighbours]
+                neighbour_answers = [answer_embs[f] for f in top_neighbours]
+                gt_answer_int = answer_int
+                gt_answer_emb = current_o[answer_int]
+
+                # PAD
+                pad_length = top_k - len(neighbour_ids)
+                if pad_length > 0:
+                    for _ in range(pad_length):
+                        neighbour_ids.append(-1)
+                        neighbour_feats = torch.concat(
+                            [neighbour_feats, torch.zeros(size=(1, neighbour_feats.size(-1)), device='cuda')], dim=-2)
+                        neighbour_answers.append(torch.zeros(size=(answer_embs[0].size(-1),), device='cuda'))
+
+                db.update({idx: {
+                    'v': current_f,
+                    'q': current_q,
+                    'o': current_o,
+                    'n_ids': neighbour_ids,
+                    'n_feats': neighbour_feats,
+                    'n_answers': neighbour_answers,
+                    'gt_answer_int': gt_answer_int,
+                    'gt_answer_emb': gt_answer_emb
+                }})
+                idx += 1
         return db
 
     def __len__(self):
@@ -139,10 +417,12 @@ class DbDataset(Dataset):
 class VideoLangLearnMCVQA:
     """Multiple-Choice vQA Model using Video Inputs and Q/A as embedding pairs"""
 
-    def __init__(self, train_dataset, model_emb='all-MiniLM-L12-v2'):
+    def __init__(self, train_dataset, model_emb='all-MiniLM-L12-v2', qa_paired=False):
+        self.qa_paired = qa_paired
         self.video_emb_answer_db = self.build_video_answer_db(train_dataset)
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
-        self.model = LateEmbFusion2Decision(v_dim=762, l_dim=762, qa_paired=True, smooth_labels=0.0)
+        self.model = LateEmbFusion2Decision(v_dim=768, l_dim=384, qa_paired=qa_paired, smooth_labels=0.0)
+        self.model.to(device='cuda')
 
     def build_video_answer_db(self, dataset) -> Dict[str, Any]:
         """Builds a Video Embedding - Answer database.
@@ -166,30 +446,286 @@ class VideoLangLearnMCVQA:
                 try:
                     question_db[question['question']]
                 except KeyError:
-                    question_db[question['question']] = {'video_emb': [], 'answer': []}
+                    question_db[question['question']] = {'video_emb': [], 'answer': [], 'answer_int': [], 'options': []}
 
                 answer = question['options'][question['answer_id']].lower()
+                answer_int = int(question['answer_id'])
                 video_emb = entry['frames'].cpu()
+                options = question['options']
                 question_db[question['question']]['video_emb'].append(video_emb)
                 question_db[question['question']]['answer'].append(answer)
+                question_db[question['question']]['answer_int'].append(answer_int)
+                question_db[question['question']]['options'].append(options)
 
         return question_db
 
-    def fit(self, lr, bs, epochs):
+    def fit(self, lr=0.001, bs=1024, epochs=100, val_external_dataset=None):
+        dataset = DbDataset(video_emb_answer_db=self.video_emb_answer_db, model_emb=self.embedding_transformer,
+                            qa_paired=self.qa_paired)
+        dataloader = DataLoader(dataset=dataset, batch_size=bs, shuffle=True, pin_memory=False,
+                                collate_fn=dataset.custom_collate_fn)
+        if val_external_dataset is not None:
+            external_video_emb_answer_db = self.build_video_answer_db(val_external_dataset)
+            val_dataset = DbDataset(video_emb_answer_db=external_video_emb_answer_db,
+                                    model_emb=self.embedding_transformer)
+            val_dataloader = DataLoader(dataset=val_dataset, batch_size=bs, shuffle=False, pin_memory=False,
+                                        collate_fn=val_dataset.custom_collate_fn)
 
-        pass
+        optimizer = torch.optim.AdamW(
+            params=[
+                {'params': self.model.parameters(), 'lr': lr, 'weight_decay': 0.01}
+            ],
+            betas=(0.99, 0.95),
+            eps=1e-8
+        )
+        optimizer.zero_grad()
 
-    def answer_q(self, frames, question, top_k=None, **args):
+        for epoch_idx in range(epochs):
+            for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
+                real_index = (epoch_idx * len(dataloader)) + step_idx
+                v, q, a, gt = batch['v'], batch['q'], batch['a'], batch['gt']
+                logits, loss, metric = self.model(v=v, q=q, a=a, gt=gt)
+                pbar.set_postfix(
+                    {'Epoch': epoch_idx, 'Step': real_index, 'Loss': loss.item(),
+                     'Accuracy': metric.item()})
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+            if epoch_idx % 10 == 9 and val_external_dataset is not None:
+                avg_loss = 0
+                avg_metric = 0
+                self.model.eval()
+                with torch.no_grad():
+                    print("[VALIDATION] ---------------")
+                    for step_idx, batch in enumerate(pbar := tqdm.tqdm(val_dataloader)):
+                        v, q, a, gt = batch['v'], batch['q'], batch['a'], batch['gt']
+                        logits, loss, metric = self.model(v=v, q=q, a=a, gt=gt)
+                        avg_loss += loss.item()
+                        avg_metric += metric.item()
+                        pbar.set_postfix(
+                            {'Epoch': epoch_idx, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
+                             'Accuracy': avg_metric / (step_idx + 1)})
+                self.model.train()
+
+        # Save At End of Final Epoch #
+        # save_checkpoint({
+        #     'state_dict': self.model.state_dict(),
+        #     'optimizer': optimizer.state_dict(),
+        # }, f'learnable_baseline')
+
+        # Freeze the model #
+        self.model.eval()
+        return
+
+    def eval(self, bs=256, external_dataset=None):
+        avg_loss = 0
+        avg_metric = 0
+        if external_dataset is None:
+            external_video_emb_answer_db = self.video_emb_answer_db
+        else:
+            external_video_emb_answer_db = self.build_video_answer_db(external_dataset)
+        dataset = DbDataset(video_emb_answer_db=external_video_emb_answer_db, model_emb=self.embedding_transformer)
+        dataloader = DataLoader(dataset=dataset, batch_size=bs, shuffle=False, pin_memory=False,
+                                collate_fn=dataset.custom_collate_fn)
+        with torch.no_grad():
+            print("[VALIDATION] ---------------")
+            for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
+                v, q, a, gt = batch['v'], batch['q'], batch['a'], batch['gt']
+                logits, loss, metric = self.model(v=v, q=q, a=a, gt=gt)
+                avg_loss += loss.item()
+                avg_metric += metric.item()
+                pbar.set_postfix(
+                    {'Epoch': 0, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
+                     'Accuracy': avg_metric / (step_idx + 1)})
+        return
+
+    def answer_learnable_q(self, frames, question, **args):
         """
-            Answer a multiple choice question.
+            Answer a multiple choice question using the learnable module
             :param question: The question to answer
             :param frames: The incoming Video Frames
-            :param top_k: Filter the top-k similar results
         """
+        ### Fix incoming frames ###
+        frames = frames.to('cuda')
+        if len(frames.size()) == 1:
+            frames = frames.unsqueeze(0)
+
+        ### Fix incoming question and answers###
+        if self.model.qa_paired is False:
+            embdq = self.embedding_transformer.encode(
+                [question['question'], question['options'][0], question['options'][1], question['options'][2]],
+                batch_size=4, convert_to_tensor=True, device='cuda')
+            q = embdq[0].unsqueeze(0)
+            a = embdq[1:, :].unsqueeze(0)
+        else:
+            pass
+
+        ### Answer with the model ###
+        with torch.no_grad():
+            answer_logits, _, _ = self.model(v=frames, q=q, a=a, gt=None)
+
+        candidate_options = [f.lower() for f in question['options']]
+        ra = answer_logits.argmax().cpu().item()
+        answer = candidate_options[ra]
+        answer_id = ra
+        return answer_id, answer
+
+
+class VideoFreqLearnMCVQA:
+    """Multiple-Choice vQA Model using Video Inputs, Frequency  and Q/A as embedding pairs"""
+
+    def __init__(self, train_dataset, model_emb='all-MiniLM-L12-v2'):
+        self.video_emb_answer_db = self.build_video_answer_db(train_dataset)
+        self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
+        self.model = RetrievalAugmentedEmbedding(v_dim=768, l_dim=384)
+        self.model.to(device='cuda')
+        self.model.train()
+
+    def build_video_answer_db(self, dataset) -> Dict[str, Any]:
+        """Builds a Video Embedding - Answer database.
+
+        Returns a dictionary where the key is the question string and the value
+        is a list of strings, each string a correct answer to a previous
+        instance of the question.
+
+        Args:
+            dataset (PerceptionDataset): A dataset generator that provides video embeddings, questions and answers
+
+        Returns:
+            Dict[str, Any]: Dictionary where the key is question string and
+            the value is list of full correct answers each time that question
+            was asked in the db_dict.
+        """
+        question_db = {}
+        print("Building Dataset...\n")
+        for entry in tqdm.tqdm(dataset):
+            for question in entry['mc_question']:
+                try:
+                    question_db[question['question']]
+                except KeyError:
+                    question_db[question['question']] = {'video_emb': [], 'answer': [], 'answer_int': [], 'options': []}
+
+                answer = question['options'][question['answer_id']].lower()
+                answer_int = int(question['answer_id'])
+                video_emb = entry['frames'].cpu()
+                options = question['options']
+                question_db[question['question']]['video_emb'].append(video_emb)
+                question_db[question['question']]['answer'].append(answer)
+                question_db[question['question']]['answer_int'].append(answer_int)
+                question_db[question['question']]['options'].append(options)
+
+        return question_db
+
+    def fit(self, lr=0.001, bs=512, epochs=100, val_external_dataset=None):
+        dataset = DbLearnDataset(video_emb_answer_db=self.video_emb_answer_db, model_emb=self.embedding_transformer)
+        dataloader = DataLoader(dataset=dataset, batch_size=bs, shuffle=True, pin_memory=False,
+                                collate_fn=dataset.custom_collate_fn)
+        # avg_loss = 0
+        # avg_metric = 0
+        # self.model.eval()
+        # with torch.no_grad():
+        #     print("[VALIDATION] ---------------")
+        #     for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
+        #         v, q, o, n_ids, n_feats, n_answ, gt_answer_int, gt_answer_emb = batch['v'], batch['q'], batch['o'], \
+        #             batch['n_ids'], batch[
+        #             'n_feats'], batch['n_answers'], batch['gt_answer_int'], batch['gt_answer_emb']
+        #         logits, loss, metric = self.model(v=v, q=q, o=o, n_ids=n_ids, n_feats=n_feats, n_answ=n_answ,
+        #                                           gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
+        #         avg_loss += loss.item()
+        #         avg_metric += metric.item()
+        #         pbar.set_postfix(
+        #             {'Epoch': 0, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
+        #              'Accuracy': avg_metric / (step_idx + 1)})
+        if val_external_dataset is not None:
+            external_video_emb_answer_db = self.build_video_answer_db(val_external_dataset)
+            val_dataset = DbLearnDataset(video_emb_answer_db=external_video_emb_answer_db,
+                                         model_emb=self.embedding_transformer)
+            val_dataloader = DataLoader(dataset=val_dataset, batch_size=bs, shuffle=False, pin_memory=False,
+                                        collate_fn=val_dataset.custom_collate_fn)
+
+        optimizer = torch.optim.Adam(params=self.model.parameters(), lr=lr)
+
+        optimizer.zero_grad()
+
+        for epoch_idx in range(epochs):
+            epoch_loss = 0
+            epoch_metric = 0
+            for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
+                real_index = (epoch_idx * len(dataloader)) + step_idx
+                ['v', 'q', 'o', 'n_ids', 'n_feats', 'n_answers', 'gt_answer_int', 'gt_answer_emb']
+                v, q, o, n_ids, n_feats, n_answ, gt_answer_int, gt_answer_emb = batch['v'], batch['q'], batch['o'], \
+                    batch['n_ids'], batch[
+                    'n_feats'], batch['n_answers'], batch['gt_answer_int'], batch['gt_answer_emb']
+                logits, loss, metric = self.model(v=v, q=q, o=o, n_ids=n_ids, n_feats=n_feats, n_answ=n_answ,
+                                                  gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
+                epoch_loss += loss.detach().item()
+                epoch_metric += metric.detach().item()
+                pbar.set_postfix(
+                    {'Epoch': epoch_idx, 'Step': real_index, 'Loss': epoch_loss / (step_idx + 1),
+                     'Accuracy': epoch_metric / (step_idx + 1)})
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+            if epoch_idx % 10 == 9 and val_external_dataset is not None:
+                avg_loss = 0
+                avg_metric = 0
+                self.model.eval()
+                with torch.no_grad():
+                    print("[VALIDATION] ---------------")
+                    for step_idx, batch in enumerate(pbar := tqdm.tqdm(val_dataloader)):
+                        v, q, a, gt = batch['v'], batch['q'], batch['a'], batch['gt']
+                        logits, loss, metric = self.model(v=v, q=q, a=a, gt=gt)
+                        avg_loss += loss.item()
+                        avg_metric += metric.item()
+                        pbar.set_postfix(
+                            {'Epoch': epoch_idx, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
+                             'Accuracy': avg_metric / (step_idx + 1)})
+                self.model.train()
+
+        # Save At End of Final Epoch #
+        save_checkpoint({
+            'state_dict': self.model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+        }, f'learnable_baseline')
+
+        # Freeze the model #
+        self.model.eval()
+        return
+
+    def eval(self, bs=256, external_dataset=None):
+        avg_loss = 0
+        avg_metric = 0
+        if external_dataset is None:
+            external_video_emb_answer_db = self.video_emb_answer_db
+        else:
+            external_video_emb_answer_db = self.build_video_answer_db(external_dataset)
+        dataset = DbDataset(video_emb_answer_db=external_video_emb_answer_db, model_emb=self.embedding_transformer)
+        dataloader = DataLoader(dataset=dataset, batch_size=bs, shuffle=False, pin_memory=False,
+                                collate_fn=dataset.custom_collate_fn)
+        with torch.no_grad():
+            print("[VALIDATION] ---------------")
+            for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
+                v, q, a, gt = batch['v'], batch['q'], batch['a'], batch['gt']
+                logits, loss, metric = self.model(v=v, q=q, a=a, gt=gt)
+                avg_loss += loss.item()
+                avg_metric += metric.item()
+                pbar.set_postfix(
+                    {'Epoch': 0, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
+                     'Accuracy': avg_metric / (step_idx + 1)})
+        return
+
+    def answer_q(self, frames, question, sample=False,
+                 shots=0, top_k=None, temp=1, approximate_gt_options=False):
+        """
+            Answer a multiple choice question.
+            :param sample: Whether to sample or use argmax
+            :param top_k: Filter the top-k similar results
+            :param temp: Use temp when sampling
+        """
+        assert shots >= -1
 
         ### Look in the DB for the same question ###
         stored_response = self.video_emb_answer_db[question['question']]
-
         ### Rank answers based on incoming Frame ###
         db_frames = torch.stack(stored_response['video_emb'], dim=0)
 
@@ -213,8 +749,13 @@ class VideoLangLearnMCVQA:
         top_neighbours = [f.item() for f in sim_scores.argsort()[-(top_k + 1):]]
         sum_scores = {}
         for i, v in enumerate(sim_scores):
+            ### Drop Top-1 MAX ###
+            ### TODO: Remove at Testing ###
+            # if i == max_item_pos:
+            #     v = 0
             if i not in top_neighbours:
                 v = 0
+            ### ---------------------- ###
             candidate_answer = stored_response['answer'][i].lower()
             if candidate_answer not in sum_scores:
                 sum_scores.update({candidate_answer: v})
@@ -222,6 +763,19 @@ class VideoLangLearnMCVQA:
                 sum_scores[candidate_answer] += v
 
         candidate_options = [f.lower() for f in question['options']]
+
+        if approximate_gt_options:
+            for k in candidate_options:
+                if k not in sum_scores:
+                    emb_k = self.sentence_transformer.encode(k, batch_size=1, convert_to_tensor=True,
+                                                             device='cuda').cpu()
+                    emb_known_responses = self.sentence_transformer.encode(list(sum_scores.keys()), batch_size=32,
+                                                                           convert_to_tensor=True,
+                                                                           device='cuda').cpu()
+                    sim_scores_coef = F.softmax(sentence_transformers.util.cos_sim(emb_k, emb_known_responses))
+                    sim_scores_score = sim_scores_coef * torch.Tensor([v for _, v in sum_scores.items()])
+                    sum_scores.update({k: sim_scores_score.sum()})
+
         new_answer_list = []
         new_answer_logits = []
         max_pos = -1
@@ -237,13 +791,26 @@ class VideoLangLearnMCVQA:
                     max_pos = idx
                 idx += 1
 
+        if sample:
+            p = F.softmax(torch.Tensor(new_answer_logits) / temp, dim=-1)
+            dist = torch.distributions.categorical.Categorical(probs=p, logits=None,
+                                                               validate_args=None)
+            if shots == 0:
+                shots = 1  # Compatibility Fix
+                answer_idx = [dist.sample(sample_shape=(shots,)).item()]
+            else:
+                answer_idx = dist.sample(sample_shape=(shots,))
+        else:
+            answer_idx = [max_pos]
+
         answer = []
         answer_id = []
-        try:
-            answer.append(new_answer_list[max_pos])
-            answer_id.append(candidate_options.index(new_answer_list[max_pos]))
-        except:
-            ra = 0
-            answer.append(candidate_options[ra])
-            answer_id.append(ra)
+        for a in answer_idx:
+            try:
+                answer.append(new_answer_list[a])
+                answer_id.append(candidate_options.index(new_answer_list[a]))
+            except:
+                ra = 0
+                answer.append(candidate_options[ra])
+                answer_id.append(ra)
         return answer_id, answer

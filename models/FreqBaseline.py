@@ -152,7 +152,7 @@ class VideoFreqMCVQABaseline:
                 except KeyError:
                     question_db[question['question']] = {'video_emb': [], 'answer': []}
 
-                answer = question['options'][question['answer_id']].lower()
+                answer = question['options'][question['answer_id']]
                 video_emb = entry['frames'].cpu()
                 question_db[question['question']]['video_emb'].append(video_emb)
                 question_db[question['question']]['answer'].append(answer)
@@ -231,13 +231,13 @@ class VideoFreqMCVQABaseline:
             if i not in top_neighbours:
                 v = 0
             ### ---------------------- ###
-            candidate_answer = stored_response['answer'][i].lower()
+            candidate_answer = stored_response['answer'][i]
             if candidate_answer not in sum_scores:
                 sum_scores.update({candidate_answer: v})
             else:
                 sum_scores[candidate_answer] += v
 
-        candidate_options = [f.lower() for f in question['options']]
+        candidate_options = [f for f in question['options']]
 
         if approximate_gt_options:
             for k in candidate_options:

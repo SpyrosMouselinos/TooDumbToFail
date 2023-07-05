@@ -154,7 +154,6 @@ class PerceptionDataset:
                 'frames': vid_frames}
 
 
-
 def test_dataset_with_json_only():
     cfg = {'video_folder': './data/videos/',
            'task': 'mc_question',

@@ -1,4 +1,6 @@
 import copy
+import json
+import math
 import os.path
 import pickle
 import random
@@ -12,6 +14,8 @@ import tqdm
 from sentence_transformers import SentenceTransformer
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics.classification import MulticlassAccuracy
+from sympy import divisors
+from utils import ANSWER_DATA_PATH
 
 
 def save_checkpoint(state, filename='checkpoint'):
@@ -31,7 +35,7 @@ class FakeBlock(nn.Module):
 
 
 class EncoderBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, dim_feedforward=None, dropout=0.1):
+    def __init__(self, embed_dim, num_heads, dim_feedforward=None, dropout=0.1, add_skip=False):
         """
         Args:
             input_dim: Dimensionality of the input
@@ -40,7 +44,7 @@ class EncoderBlock(nn.Module):
             dropout: Dropout probability to use in the dropout layers
         """
         super().__init__()
-
+        self.add_skip = add_skip  # Whether to add skip connection at the layer
         # Attention layer
         self.self_attn = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout,
                                                batch_first=True,
@@ -65,15 +69,31 @@ class EncoderBlock(nn.Module):
     def forward(self, q, k, v, mask=None):
         # Attention part
         attn_out, _ = self.self_attn(query=q, key=k, value=v)
-        q = q + self.dropout(attn_out)
-        q = self.norm1(q)
+        if self.add_skip:
+            q = q + self.dropout(attn_out)
+            q = self.norm1(q)
+        else:
+            q = attn_out
 
-        # MLP part
-        linear_out = self.linear_net(q)
-        q = q + self.dropout(linear_out)
-        q = self.norm2(q)
+        # # MLP part
+        # linear_out = self.linear_net(q)
+        # q = q + self.dropout(linear_out)
+        # q = self.norm2(q)
 
         return q
+
+
+class StrippedEncoderBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.temp = nn.Parameter(data=torch.ones(1, ), requires_grad=True)
+
+    def forward(self, q, k, v):
+        dk = q.size()[-1]
+        scores = q.matmul(k.transpose(-2, -1)) / (self.temp * math.sqrt(dk))
+        attention = F.softmax(scores, dim=-1)
+        y = attention.matmul(v)
+        return y
 
 
 class LateEmbFusion2Decision(nn.Module):
@@ -158,18 +178,37 @@ class LateEmbFusion2Decision(nn.Module):
 
 
 class RetrievalAugmentedEmbedding(nn.Module):
-    def __init__(self, v_dim=768, l_dim=384):
+    def __init__(self, v_dim=768, l_dim=384, o_dim=None):
         super().__init__()
         self.v_dim = v_dim
         self.q_dim = l_dim
-        self.emb_dim = self.v_dim + self.q_dim
-        self.internal = nn.Linear(self.emb_dim, self.emb_dim)
-        self.v_block = nn.Sequential(self.internal)
-        self.v2_block = nn.Sequential(self.internal, nn.Dropout1d(p=0.1))
-        self.q_block = nn.Sequential(nn.Identity())
-        self.o_block = nn.Sequential(nn.Identity())
-        self.calc_block = EncoderBlock(embed_dim=self.emb_dim, num_heads=12, dropout=0.1)
-        self.transform_block = nn.Sequential(nn.Linear(self.emb_dim, 3))
+        if o_dim is None:
+            self.o_dim = self.q_dim
+        else:
+            self.o_dim = o_dim
+        self.emb_dim = self.v_dim
+        # Trainable Query #
+        #self.tq = torch.nn.Parameter(torch.randn(size=(1, 1, self.emb_dim)), requires_grad=True)
+        # Common Dropout #
+        self.common_dropout = nn.Dropout1d(p=0.0)
+        # Common VISION BLOCKS #
+        self.common_vision_backbone = nn.Identity()
+        self.v_block = nn.Sequential(self.common_vision_backbone)
+        self.v2_block = nn.Sequential(self.common_vision_backbone, self.common_dropout)
+
+        self.q_block = nn.Identity()
+
+        # Common OPTION BLOCKS #
+        # self.common_option_backbone = nn.Sequential(nn.Linear(self.o_dim, self.emb_dim))
+        self.common_option_backbone = nn.Identity()
+        # self.common_option_backbone = nn.Identity()
+        self.o_block = nn.Sequential(self.common_option_backbone)
+        self.o2_block = nn.Sequential(self.common_option_backbone, self.common_dropout)
+
+        self.calc_block = EncoderBlock(embed_dim=self.emb_dim, num_heads=16, dropout=0.1, add_skip=False)
+        self.score_block = EncoderBlock(embed_dim=self.emb_dim, num_heads=16, dropout=0.1, add_skip=False)
+        self.transform_block = nn.Sequential(nn.Linear(self.v_dim + self.q_dim + self.o_dim, 128), nn.ReLU(),
+                                             nn.Dropout(p=0.5), nn.Linear(128, 1))
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3)
 
@@ -203,11 +242,29 @@ class RetrievalAugmentedEmbedding(nn.Module):
 
     def forward(self, v, q, o, n_ids=None, n_feats=None, n_answ=None,
                 gt_answer_int=None, gt_answer_emb=None):
-        vo = self.v_block(torch.cat([v.unsqueeze(1).repeat(1, 3, 1), o], dim=2))
-        na = self.v2_block(torch.cat([n_feats, n_answ], dim=2))
-        out_1 = self.calc_block(vo, na, na)
-        out_1 = torch.sum(out_1, dim=1).squeeze(1)
-        scores = self.transform_block(out_1)
+        #################################################################################
+        v = self.v_block(v)
+        #nv = self.v2_block(n_feats)
+        q = self.q_block(q)
+        o = self.o_block(o)
+        #n_answ = self.o2_block(n_answ)
+        combination1 = torch.cat([v , q , o[:, 0, :]], dim=1)
+        combination2 = torch.cat([v , q , o[:, 1, :]], dim=1)
+        combination3 = torch.cat([v , q , o[:, 2, :]], dim=1)
+        score_0 = self.transform_block(combination1)
+        score_1 = self.transform_block(combination2)
+        score_2 = self.transform_block(combination3)
+        ########################################
+        # answer = self.calc_block(v, nv, n_answ)
+        # aggr = self.score_block(answer, o, o).squeeze(1)
+        #########################################
+        # score_0 = aggr * o[:, 0, :]  # BS, E
+        # score_0 = score_0.sum(1).unsqueeze(1)
+        # score_1 = aggr * o[:, 1, :]  # BS, E
+        # score_1 = score_1.sum(1).unsqueeze(1)
+        # score_2 = aggr * o[:, 2, :]  # BS, E
+        # score_2 = score_2.sum(1).unsqueeze(1)
+        scores = torch.cat([score_0, score_1, score_2], dim=1)
 
         if gt_answer_int is not None:
             loss = self.calc_loss(scores, gt_answer_int)
@@ -296,12 +353,25 @@ class DbDataset(Dataset):
 
 
 class DbLearnDataset(Dataset):
-    def __init__(self, video_emb_answer_db, model_emb):
-        self.video_emb_answer_db = video_emb_answer_db
+    def __init__(self, video_emb_answer_db, model_emb, video_emb_val_db=None, mode='train'):
+        self.mode = mode
         self.model_emb = model_emb
-        print("Reordering DB...\n")
-        self.video_emb_answer_db = self.freq_reorder()
+        self.video_emb_answer_db = video_emb_answer_db
+        if video_emb_val_db is None:
+            self.video_emb_val_db = None
+        else:
+            print("Reordering Test DB...\n")
+            self.video_emb_val_db = video_emb_val_db
+            self.video_emb_val_db = self.freq_reorder_test()
+        print("Reordering Train DB...\n")
+        self.video_emb_answer_db = self.freq_reorder_train()
         return
+
+    def set_train_mode(self):
+        self.mode = 'train'
+
+    def set_eval_mode(self):
+        self.mode = 'eval'
 
     @staticmethod
     def custom_collate_fn(batch):
@@ -323,9 +393,15 @@ class DbLearnDataset(Dataset):
 
         for k in KEYS:
             NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
+        # Expand Options #
+        NEW_BATCH['o'] = torch.nn.functional.one_hot(NEW_BATCH['o'], num_classes=6370).squeeze(1).to('cuda')
+        NEW_BATCH['o'] = NEW_BATCH['o'].float()
+        NEW_BATCH['n_answers'] = torch.nn.functional.one_hot(NEW_BATCH['n_answers'], num_classes=6370).squeeze(1).to(
+            'cuda')
+        NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].float()
         return NEW_BATCH
 
-    def freq_reorder(self, top_k=25, train=True):
+    def freq_reorder_train(self, top_k=25):
         idx = 0
         db = {}
         # Pre-calc Questions #
@@ -352,14 +428,16 @@ class DbLearnDataset(Dataset):
             # For each Video / Answer pair #
 
             # Pre-cal Answers #
-            answer_embs = self.model_emb.encode(stored_response['answer'],
-                                                batch_size=32,
-                                                convert_to_tensor=True,
-                                                device='cuda')
-            options_emb = self.model_emb.encode([k for f in stored_response['options'] for k in f],
-                                                batch_size=32,
-                                                convert_to_tensor=True,
-                                                device='cuda')
+            # answer_embs = self.model_emb.encode(stored_response['answer'],
+            #                                     batch_size=32,
+            #                                     convert_to_tensor=True,
+            #                                     device='cuda')
+            answer_embs = stored_response['answer']
+            # options_emb = self.model_emb.encode([k for f in stored_response['options'] for k in f],
+            #                                     batch_size=32,
+            #                                     convert_to_tensor=True,
+            #                                     device='cuda')
+            options_emb = [k for f in stored_response['options'] for k in f]
 
             for jk, (frame, answer_int) in enumerate(
                     zip(stored_response['video_emb'], stored_response['answer_int'])):
@@ -367,15 +445,12 @@ class DbLearnDataset(Dataset):
                 if top_k is None:
                     top_k = sim_scores.size()[-1]
                 max_item_pos = sim_scores.argmax().item()
-                if train:
-                    top_neighbours = [f.item() for f in sim_scores.argsort()[-(top_k + 1):] if not f == max_item_pos]
-                else:
-                    top_neighbours = [f.item() for f in sim_scores.argsort()[-top_k:]]
+                top_neighbours = [f.item() for f in sim_scores.argsort()[-(top_k + 1):] if not f == max_item_pos]
 
                 ### Gather Neighbour similarity Tensor ###
                 current_f = frame
                 current_q = question_emb
-                current_o = [options_emb[jk], options_emb[jk + 1], options_emb[jk + 2]]
+                current_o = [options_emb[jk * 3], options_emb[jk * 3 + 1], options_emb[jk * 3 + 2]]
 
                 neighbour_ids = top_neighbours
                 neighbour_feats = db_frames[top_neighbours]
@@ -390,7 +465,90 @@ class DbLearnDataset(Dataset):
                         neighbour_ids.append(-1)
                         neighbour_feats = torch.concat(
                             [neighbour_feats, torch.zeros(size=(1, neighbour_feats.size(-1)), device='cuda')], dim=-2)
-                        neighbour_answers.append(torch.zeros(size=(answer_embs[0].size(-1),), device='cuda'))
+                        # neighbour_answers.append(torch.zeros(size=(answer_embs[0].size(-1),), device='cuda'))
+                        neighbour_answers.append(0)
+
+                db.update({idx: {
+                    'v': current_f,
+                    'q': current_q,
+                    'o': current_o,
+                    'n_ids': neighbour_ids,
+                    'n_feats': neighbour_feats,
+                    'n_answers': neighbour_answers,
+                    'gt_answer_int': gt_answer_int,
+                    'gt_answer_emb': gt_answer_emb
+                }})
+                idx += 1
+        return db
+
+    def freq_reorder_test(self, top_k=25):
+        idx = 0
+        db = {}
+        # Pre-calc Questions #
+        question_embs = self.model_emb.encode(list(self.video_emb_val_db.keys()),
+                                              batch_size=32,
+                                              convert_to_tensor=True,
+                                              device='cuda').to('cpu')
+
+        # For each question in the eval DB, find the same in the train DB #
+        for ij_eval, (question_eval, stored_response_eval) in enumerate(tqdm.tqdm(self.video_emb_val_db.items())):
+            # Look for the same in the Train DB #
+            for ij_train, (question_train, stored_response_train) in enumerate(
+                    self.video_emb_answer_db.items()):
+                if question_eval == question_train:
+                    db_frames_eval = torch.stack(stored_response_eval['video_emb'], dim=0).to('cpu')
+                    db_frames_train = torch.stack(stored_response_train['video_emb'], dim=0).to('cpu')
+                    break
+
+            question_emb = question_embs[ij_eval]
+            # Pre-calc Similarities #
+            x = db_frames_eval[:, None]
+            y = db_frames_train[None, :]
+            sim_scoress = F.cosine_similarity(x, y, dim=-1)
+            sim_scoress = torch.clip(sim_scoress, 0, 1).cpu()
+
+            # For each Video / Answer pair #
+
+            # Pre-cal Answers #
+            # answer_embs = self.model_emb.encode(stored_response_train['answer'],
+            #                                     batch_size=32,
+            #                                     convert_to_tensor=True,
+            #                                     device='cuda').to('cpu')
+            answer_embs = stored_response_train['answer']
+            # options_emb = self.model_emb.encode([k for f in stored_response_eval['options'] for k in f],
+            #                                     batch_size=32,
+            #                                     convert_to_tensor=True,
+            #                                     device='cuda').to('cpu')
+            options_emb = [k for f in stored_response_eval['options'] for k in f]
+
+            for jk, (frame, answer_int) in enumerate(
+                    zip(stored_response_eval['video_emb'], stored_response_eval['answer_int'])):
+                sim_scores = sim_scoress[jk]
+                if top_k is None:
+                    top_k = sim_scores.size()[-1]
+                max_item_pos = sim_scores.argmax().item()
+                top_neighbours = [f.item() for f in sim_scores.argsort()[-(top_k + 1):] if not f == max_item_pos]
+
+                ### Gather Neighbour similarity Tensor ###
+                current_f = frame
+                current_q = question_emb
+                current_o = [options_emb[jk * 3], options_emb[jk * 3 + 1], options_emb[jk * 3 + 2]]
+
+                neighbour_ids = top_neighbours
+                neighbour_feats = db_frames_train[top_neighbours]
+                neighbour_answers = [answer_embs[f] for f in top_neighbours]
+                gt_answer_int = answer_int
+                gt_answer_emb = current_o[answer_int]
+
+                # PAD
+                pad_length = top_k - len(neighbour_ids)
+                if pad_length > 0:
+                    for _ in range(pad_length):
+                        neighbour_ids.append(-1)
+                        neighbour_feats = torch.concat(
+                            [neighbour_feats, torch.zeros(size=(1, neighbour_feats.size(-1)))], dim=-2)
+                        # neighbour_answers.append(torch.zeros(size=(answer_embs[0].size(-1),)))
+                        neighbour_answers.append(0)
 
                 db.update({idx: {
                     'v': current_f,
@@ -406,12 +564,18 @@ class DbLearnDataset(Dataset):
         return db
 
     def __len__(self):
-        return len(self.video_emb_answer_db)
+        if self.mode == 'eval':
+            return len(self.video_emb_val_db)
+        elif self.mode == 'train':
+            return len(self.video_emb_answer_db)
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        return self.video_emb_answer_db[idx]
+        if self.mode == 'eval':
+            return self.video_emb_val_db[idx]
+        elif self.mode == 'train':
+            return self.video_emb_answer_db[idx]
 
 
 class VideoLangLearnMCVQA:
@@ -448,7 +612,7 @@ class VideoLangLearnMCVQA:
                 except KeyError:
                     question_db[question['question']] = {'video_emb': [], 'answer': [], 'answer_int': [], 'options': []}
 
-                answer = question['options'][question['answer_id']].lower()
+                answer = question['options'][question['answer_id']]
                 answer_int = int(question['answer_id'])
                 video_emb = entry['frames'].cpu()
                 options = question['options']
@@ -574,10 +738,11 @@ class VideoLangLearnMCVQA:
 class VideoFreqLearnMCVQA:
     """Multiple-Choice vQA Model using Video Inputs, Frequency  and Q/A as embedding pairs"""
 
-    def __init__(self, train_dataset, model_emb='all-MiniLM-L12-v2'):
+    def __init__(self, train_dataset, model_emb='all-MiniLM-L12-v2', look_for_one_hot=True):
+        self.lfoh = look_for_one_hot
         self.video_emb_answer_db = self.build_video_answer_db(train_dataset)
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
-        self.model = RetrievalAugmentedEmbedding(v_dim=768, l_dim=384)
+        self.model = RetrievalAugmentedEmbedding(v_dim=768, l_dim=384, o_dim=6370)
         self.model.to(device='cuda')
         self.model.train()
 
@@ -596,6 +761,13 @@ class VideoFreqLearnMCVQA:
             the value is list of full correct answers each time that question
             was asked in the db_dict.
         """
+        if self.lfoh:
+            print('Loading Answer Dict...\n')
+            with open(ANSWER_DATA_PATH, 'r') as fin:
+                answer_data_json = json.load(fin)
+        else:
+            answer_data_json = None
+
         question_db = {}
         print("Building Dataset...\n")
         for entry in tqdm.tqdm(dataset):
@@ -605,10 +777,18 @@ class VideoFreqLearnMCVQA:
                 except KeyError:
                     question_db[question['question']] = {'video_emb': [], 'answer': [], 'answer_int': [], 'options': []}
 
-                answer = question['options'][question['answer_id']].lower()
+                if self.lfoh:
+                    answer = answer_data_json[question['options'][question['answer_id']]]['int_index']
+                else:
+                    answer = question['options'][question['answer_id']]
+
                 answer_int = int(question['answer_id'])
                 video_emb = entry['frames'].cpu()
-                options = question['options']
+
+                if self.lfoh:
+                    options = [answer_data_json[f]['int_index'] for f in question['options']]
+                else:
+                    options = question['options']
                 question_db[question['question']]['video_emb'].append(video_emb)
                 question_db[question['question']]['answer'].append(answer)
                 question_db[question['question']]['answer_int'].append(answer_int)
@@ -616,35 +796,37 @@ class VideoFreqLearnMCVQA:
 
         return question_db
 
-    def fit(self, lr=0.001, bs=512, epochs=100, val_external_dataset=None):
-        dataset = DbLearnDataset(video_emb_answer_db=self.video_emb_answer_db, model_emb=self.embedding_transformer)
+    def fit(self, lr=0.0001, bs=512, epochs=100, val_external_dataset=None):
+        if val_external_dataset is not None:
+            if os.path.exists('ved.pkl.ds'):
+                with open('ved.pkl.ds', 'rb') as fin:
+                    dataset = pickle.load(fin)
+            else:
+                external_video_emb_answer_db = self.build_video_answer_db(val_external_dataset)
+                dataset = DbLearnDataset(video_emb_answer_db=self.video_emb_answer_db,
+                                         video_emb_val_db=external_video_emb_answer_db,
+                                         model_emb=self.embedding_transformer)
+                with open('ved.pkl.ds', 'wb') as fout:
+                    pickle.dump(dataset, fout)
+        else:
+            if os.path.exists('ned.pkl.ds'):
+                with open('ned.pkl.ds', 'rb') as fin:
+                    dataset = pickle.load(fin)
+            else:
+                dataset = DbLearnDataset(video_emb_answer_db=self.video_emb_answer_db,
+                                         video_emb_val_db=None,
+                                         model_emb=self.embedding_transformer)
+                with open('ned.pkl.ds', 'wb') as fout:
+                    pickle.dump(dataset, fout)
+        dataset.set_train_mode()
         dataloader = DataLoader(dataset=dataset, batch_size=bs, shuffle=True, pin_memory=False,
                                 collate_fn=dataset.custom_collate_fn)
-        # avg_loss = 0
-        # avg_metric = 0
-        # self.model.eval()
-        # with torch.no_grad():
-        #     print("[VALIDATION] ---------------")
-        #     for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
-        #         v, q, o, n_ids, n_feats, n_answ, gt_answer_int, gt_answer_emb = batch['v'], batch['q'], batch['o'], \
-        #             batch['n_ids'], batch[
-        #             'n_feats'], batch['n_answers'], batch['gt_answer_int'], batch['gt_answer_emb']
-        #         logits, loss, metric = self.model(v=v, q=q, o=o, n_ids=n_ids, n_feats=n_feats, n_answ=n_answ,
-        #                                           gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
-        #         avg_loss += loss.item()
-        #         avg_metric += metric.item()
-        #         pbar.set_postfix(
-        #             {'Epoch': 0, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
-        #              'Accuracy': avg_metric / (step_idx + 1)})
+
         if val_external_dataset is not None:
-            external_video_emb_answer_db = self.build_video_answer_db(val_external_dataset)
-            val_dataset = DbLearnDataset(video_emb_answer_db=external_video_emb_answer_db,
-                                         model_emb=self.embedding_transformer)
-            val_dataloader = DataLoader(dataset=val_dataset, batch_size=bs, shuffle=False, pin_memory=False,
-                                        collate_fn=val_dataset.custom_collate_fn)
+            val_dataloader = DataLoader(dataset=dataset, batch_size=bs, shuffle=False, pin_memory=False,
+                                        collate_fn=dataset.custom_collate_fn)
 
         optimizer = torch.optim.Adam(params=self.model.parameters(), lr=lr)
-
         optimizer.zero_grad()
 
         for epoch_idx in range(epochs):
@@ -652,7 +834,6 @@ class VideoFreqLearnMCVQA:
             epoch_metric = 0
             for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
                 real_index = (epoch_idx * len(dataloader)) + step_idx
-                ['v', 'q', 'o', 'n_ids', 'n_feats', 'n_answers', 'gt_answer_int', 'gt_answer_emb']
                 v, q, o, n_ids, n_feats, n_answ, gt_answer_int, gt_answer_emb = batch['v'], batch['q'], batch['o'], \
                     batch['n_ids'], batch[
                     'n_feats'], batch['n_answers'], batch['gt_answer_int'], batch['gt_answer_emb']
@@ -666,20 +847,27 @@ class VideoFreqLearnMCVQA:
                 loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
-            if epoch_idx % 10 == 9 and val_external_dataset is not None:
+            if epoch_idx % 2 == 1 and val_external_dataset is not None:
                 avg_loss = 0
                 avg_metric = 0
                 self.model.eval()
+                dataset.set_eval_mode()
                 with torch.no_grad():
+
                     print("[VALIDATION] ---------------")
                     for step_idx, batch in enumerate(pbar := tqdm.tqdm(val_dataloader)):
-                        v, q, a, gt = batch['v'], batch['q'], batch['a'], batch['gt']
-                        logits, loss, metric = self.model(v=v, q=q, a=a, gt=gt)
-                        avg_loss += loss.item()
-                        avg_metric += metric.item()
+                        v, q, o, n_ids, n_feats, n_answ, gt_answer_int, gt_answer_emb = batch['v'], batch['q'], batch[
+                            'o'], \
+                            batch['n_ids'], batch[
+                            'n_feats'], batch['n_answers'], batch['gt_answer_int'], batch['gt_answer_emb']
+                        logits, loss, metric = self.model(v=v, q=q, o=o, n_ids=n_ids, n_feats=n_feats, n_answ=n_answ,
+                                                          gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
+                        avg_loss += loss.detach().item()
+                        avg_metric += metric.detach().item()
                         pbar.set_postfix(
                             {'Epoch': epoch_idx, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
                              'Accuracy': avg_metric / (step_idx + 1)})
+                dataset.set_train_mode()
                 self.model.train()
 
         # Save At End of Final Epoch #

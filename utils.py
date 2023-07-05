@@ -90,6 +90,7 @@ CAT = AREA + REASONING + TAG
 DATA_PATH = data_path = './data/'
 TRAIN_DATA_PATH = train_data_path = DATA_PATH + 'train/'
 VALID_DATA_PATH = valid_data_path = DATA_PATH + 'valid/'
+ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keys.json'
 
 
 def download_and_unzip(url: str, destination: str):
@@ -169,6 +170,36 @@ def load_db_json(db_file: str) -> Dict[str, Any]:
         return db_file_dict
 
 
+def gather_answers(db_files):
+    if isinstance(db_files, str):
+        db_files = [db_files]
+    else:
+        pass
+    global_list = []
+    for db in db_files:
+        dict = load_db_json(db)
+        for q, i in dict.items():
+            for qas in i['mc_question']:
+                for answer in qas['options']:
+                    global_list.append(answer)
+
+    # Sort Alphabetically #
+    global_list = list(set(global_list))
+    global_list.sort()
+
+    MAX_ITEMS = len(global_list)
+    print(MAX_ITEMS)
+    # new_dict = {}
+    # for index, item in enumerate(global_list):
+    #     one_hot = [0] * MAX_ITEMS
+    #     one_hot[index] = 1
+    #     new_dict.update({item: {'int_index': index, 'one_hot_index': one_hot}})
+    #
+    # with open(ANSWER_DATA_PATH, 'w') as fout:
+    #     json.dump(new_dict, fout)
+    return
+
+
 def load_mp4_to_frames(filename: str, indices=None, resize_to=None) -> np.array:
     """Loads an MP4 video file and returns its frames as a NumPy array.
 
@@ -219,6 +250,44 @@ def get_video_frames(data_item: Dict[str, Any],
     return parts
 
 
+def get_audio_frames(data_item: Dict[str, Any],
+                     video_folder_path: str,
+                     override_video_name: bool = False, num_samples=16, n_segments=1) -> np.array:
+    """Loads audio frames of a video specified by an item dictionary.
+
+    Assumes format of annotations used in the Perception Test Dataset.
+
+    Args:
+      data_item (Dict): Item from dataset containing metadata.
+      video_folder_path (str): Path to the directory containing videos.
+
+    Returns:
+      np.array: Frames of the video as a NumPy array.
+      :param override_video_name: Add one random video from the pre-existing ones
+    """
+
+    if override_video_name:
+        video_file = os.path.join(video_folder_path,
+                                  'video_1580') + '.mp4'
+    else:
+        video_file = os.path.join(video_folder_path,
+                                  data_item['metadata']['video_id']) + '.mp4'
+
+    parts = []
+
+    # You can specify the desired sample rate and channel layout
+    ar = de.AudioReader(video_file, ctx=ctx, sample_rate=16000, mono=True)
+    t = ar.shape[1]
+    # Does not Make Much Sense to splice it like that...#
+    # for i in range(n_segments):
+    #     indices = np.linspace(i * (t // n_segments), (i + 1) * ((t // n_segments) - 2), num_samples)
+    #     indices = np.clip(indices, i * (t // n_segments), (i + 1) * ((t // n_segments) - 2)).astype(int)
+    #     parts.append(ar.get_batch(indices).asnumpy())
+    indices = list(range(0, t))
+    return ar.get_batch(indices=indices).asnumpy()
+
+
+
 # def video_temporal_subsample(
 #         x: np.ndarray, num_samples: int, temporal_dim: int = 0, n_segments: int = 1):
 #     """
@@ -262,6 +331,7 @@ def test_video(valid_db_dict, video_id='video_8241'):
             print('Tag: ', example_q['tag'])
             print('area: ', example_q['area'])
             print('---------------------------------')
+
 
 
 def calc_top(answers_dict: Dict[str, Any],
@@ -410,3 +480,23 @@ def test_download_samples():
     download_and_unzip(train_videos_url, data_path + '/train')
     # valid_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/valid_videos.zip'
     # download_and_unzip(valid_videos_url, data_path)
+
+# gather_answers(['./data/mc_question_train.json', './data/mc_question_valid.json'])
+
+
+x = get_audio_frames(None, './data/sample/videos/', override_video_name=True)
+
+from transformers import AutoFeatureExtractor, HubertModel
+import torch
+
+
+feature_extractor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
+
+# audio file is decoded on the fly
+inputs = feature_extractor(x[0][0], sampling_rate=16000, return_tensors="pt")
+
+with torch.no_grad():
+    logits = model(**inputs)['last_hidden_state'].mean(1)
+
+print(logits.size())

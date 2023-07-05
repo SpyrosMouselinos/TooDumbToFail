@@ -47,7 +47,8 @@ model = model.to('cuda').half()
 def get_video_frames_wrapper(data_items):
     loaded_videos = []
     for i in range(STORE_BATCH_SIZE):
-        vid_frames = get_video_frames(data_items[i], video_folder, override_video_name=False, resize_to=224, num_samples=16, n_segments=N_SEGMENTS)
+        vid_frames = get_video_frames(data_items[i], video_folder, override_video_name=False, resize_to=224,
+                                      num_samples=16, n_segments=N_SEGMENTS)
         for s in range(N_SEGMENTS):
             for f in vid_frames[s]:
                 loaded_videos.append(f)
@@ -92,6 +93,62 @@ def maybe_get_video_frames(data_items, n_segments=1):
                     pickle.dump(vid_frames[j], fout)
             return
     return
+
+
+def get_audio_frames_wrapper(data_items):
+    loaded_audios = []
+    for i in range(STORE_BATCH_SIZE):
+        aud_frames = get_audio_frames(data_items[i],
+                                      video_folder,
+                                      override_video_name=False,
+                                      resize_to=224,
+                                      num_samples=16,
+                                      n_segments=N_SEGMENTS)
+        for s in range(N_SEGMENTS):
+            for f in aud_frames[s]:
+                loaded_audios.append(f)
+
+    inputs = processor(loaded_audios, return_tensors="pt")
+    inputs['audio_values'] = inputs['audio_values'].resize(STORE_BATCH_SIZE * N_SEGMENTS, 16,
+                                                           inputs['audio_values'].size()[2],
+                                                           inputs['audio_values'].size()[3],
+                                                           inputs['audio_values'].size()[4])
+    final_logits = []
+    if N_SEGMENTS >= MINI_BATCH_SIZE:
+        for i in range(N_SEGMENTS // MINI_BATCH_SIZE):
+            semi_input = inputs['audio_values'][i * MINI_BATCH_SIZE: (i + 1) * MINI_BATCH_SIZE].to('cuda')
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                with torch.no_grad():
+                    outputs = model(audio_values=semi_input)
+                    final_logits = outputs.logits
+                    final_logits = final_logits.reshape(STORE_BATCH_SIZE, N_SEGMENTS, -1)
+    else:
+        semi_input = inputs['audio_values'].to('cuda')
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+            with torch.no_grad():
+                outputs = model(audio_values=semi_input)
+                final_logits = outputs.logits
+                final_logits = final_logits.reshape(STORE_BATCH_SIZE, N_SEGMENTS, -1)
+    aud_frames = final_logits.mean(1)
+    return aud_frames
+
+
+def maybe_get_audio_frames(data_items, n_segments=1):
+    for i in range(len(data_items)):
+        audio_file_pickle = os.path.join(video_folder,
+                                         data_items[i]['metadata']['video_id']) + f'_audioseg_{n_segments}.pkl'
+        if os.path.exists(audio_file_pickle):
+            continue
+        else:
+            aud_frames = get_audio_frames_wrapper(data_items=data_items)
+            for j in range(len(data_items)):
+                audio_file_pickle = os.path.join(video_folder,
+                                                 data_items[j]['metadata']['video_id']) + f'_audioseg_{n_segments}.pkl'
+                with open(audio_file_pickle, 'wb') as fout:
+                    pickle.dump(aud_frames[j], fout)
+            return
+    return
+
 
 s = time.time()
 for batch_idx in tqdm.trange(total_length // STORE_BATCH_SIZE):

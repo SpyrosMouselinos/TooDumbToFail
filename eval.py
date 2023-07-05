@@ -28,13 +28,13 @@ valid_cfg = {'video_folder': './data/valid/',
              'split': 'valid',
              'js_only': False}
 val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
-#model = VideoLangMCVQABaseline(train_mc_vqa_dataset)
-#model = VideoFreqMCVQABaseline(train_mc_vqa_dataset)
+#video_model = VideoLangMCVQABaseline(train_mc_vqa_dataset)
+#video_model = VideoFreqMCVQABaseline(train_mc_vqa_dataset)
 model = VideoFreqLearnMCVQA(train_mc_vqa_dataset)
 model.fit(val_external_dataset=val_mc_vqa_dataset, lr=0.001)
-#model.eval(external_dataset=val_mc_vqa_dataset)
+#video_model.eval(external_dataset=val_mc_vqa_dataset)
 
-#model = FreqMCVQABaseline(train_db_dict)
+#video_model = FreqMCVQABaseline(train_db_dict)
 
 # results = {}
 #
@@ -51,8 +51,8 @@ model.fit(val_external_dataset=val_mc_vqa_dataset, lr=0.001)
 #             video_answers = []
 #
 #             for q_idx, q in enumerate(video_item['mc_question']):
-#                 # model inference
-#                 q_answer_id, q_answer = model.answer_q(video_item['frames'],
+#                 # video_model inference
+#                 q_answer_id, q_answer = video_model.answer_q(video_item['frames'],
 #                                                        q,
 #                                                        shots=shots,
 #                                                        top_k=25,  # 0.6024@25

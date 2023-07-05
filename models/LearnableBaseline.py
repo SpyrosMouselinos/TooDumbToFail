@@ -673,11 +673,11 @@ class VideoLangLearnMCVQA:
 
         # Save At End of Final Epoch #
         # save_checkpoint({
-        #     'state_dict': self.model.state_dict(),
+        #     'state_dict': self.video_model.state_dict(),
         #     'optimizer': optimizer.state_dict(),
         # }, f'learnable_baseline')
 
-        # Freeze the model #
+        # Freeze the video_model #
         self.model.eval()
         return
 
@@ -724,7 +724,7 @@ class VideoLangLearnMCVQA:
         else:
             pass
 
-        ### Answer with the model ###
+        ### Answer with the video_model ###
         with torch.no_grad():
             answer_logits, _, _ = self.model(v=frames, q=q, a=a, gt=None)
 
@@ -876,7 +876,7 @@ class VideoFreqLearnMCVQA:
             'optimizer': optimizer.state_dict(),
         }, f'learnable_baseline')
 
-        # Freeze the model #
+        # Freeze the video_model #
         self.model.eval()
         return
 

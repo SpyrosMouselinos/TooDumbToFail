@@ -5,26 +5,26 @@ import time
 import torch
 import tqdm
 from data import PerceptionDataset
-from utils import load_db_json, get_video_frames
+from utils import load_db_json, get_video_frames, get_audio_frames
 from utils import test_download_samples
 import torch.nn as nn
 from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
-
+from transformers import AutoFeatureExtractor, HubertModel
 # Download annotations + train_videos
 # test_download_samples()
 
 # Constants
 
-
-train_db_path = 'data/mc_question_valid.json'
+EXTRACTED_MODALITY = 'Audio'
+SPLIT = split = 'valid'
+train_db_path = f'data/mc_question_{SPLIT}.json'
 pt_db_dict = load_db_json(train_db_path)
 
-video_folder = './data/valid/'
+video_folder = f'./data/{SPLIT}/' if SPLIT == 'valid' else f'./data/{SPLIT}/videos'
 task = 'mc_question'
-split = 'valid'
 N_SEGMENTS = 1
 MINI_BATCH_SIZE = 16
-STORE_BATCH_SIZE = 12
+STORE_BATCH_SIZE = 4
 
 
 def load_dataset(d):
@@ -38,10 +38,18 @@ def load_dataset(d):
 
 pt_db_list = load_dataset(pt_db_dict)
 total_length = len(pt_db_list)
-processor = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
-model = VideoMAEForVideoClassification.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
-model.classifier = nn.Identity()
-model = model.to('cuda').half()
+if EXTRACTED_MODALITY == 'Video':
+    processor = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
+    model = VideoMAEForVideoClassification.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
+    model.classifier = nn.Identity()
+    model = model.to('cuda').half()
+elif EXTRACTED_MODALITY == 'Audio':
+    processor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+    model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
+    model = model.to('cuda')
+else:
+    raise NotImplementedError
+
 
 
 def get_video_frames_wrapper(data_items):
@@ -101,35 +109,27 @@ def get_audio_frames_wrapper(data_items):
         aud_frames = get_audio_frames(data_items[i],
                                       video_folder,
                                       override_video_name=False,
-                                      resize_to=224,
-                                      num_samples=16,
-                                      n_segments=N_SEGMENTS)
+                                      num_samples=None,
+                                      n_segments=None)
         for s in range(N_SEGMENTS):
-            for f in aud_frames[s]:
-                loaded_audios.append(f)
+            loaded_audios.append(aud_frames[s])
 
-    inputs = processor(loaded_audios, return_tensors="pt")
-    inputs['audio_values'] = inputs['audio_values'].resize(STORE_BATCH_SIZE * N_SEGMENTS, 16,
-                                                           inputs['audio_values'].size()[2],
-                                                           inputs['audio_values'].size()[3],
-                                                           inputs['audio_values'].size()[4])
+    inputs = processor(loaded_audios, sampling_rate=16000, return_tensors="pt", padding=True)
     final_logits = []
     if N_SEGMENTS >= MINI_BATCH_SIZE:
         for i in range(N_SEGMENTS // MINI_BATCH_SIZE):
-            semi_input = inputs['audio_values'][i * MINI_BATCH_SIZE: (i + 1) * MINI_BATCH_SIZE].to('cuda')
-            with torch.cuda.amp.autocast(dtype=torch.float16):
-                with torch.no_grad():
-                    outputs = model(audio_values=semi_input)
-                    final_logits = outputs.logits
-                    final_logits = final_logits.reshape(STORE_BATCH_SIZE, N_SEGMENTS, -1)
-    else:
-        semi_input = inputs['audio_values'].to('cuda')
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+            semi_input = inputs['input_values'][i * MINI_BATCH_SIZE: (i + 1) * MINI_BATCH_SIZE].to('cuda')
+            #with torch.cuda.amp.autocast(dtype=torch.float16):
             with torch.no_grad():
-                outputs = model(audio_values=semi_input)
-                final_logits = outputs.logits
-                final_logits = final_logits.reshape(STORE_BATCH_SIZE, N_SEGMENTS, -1)
-    aud_frames = final_logits.mean(1)
+                outputs = model(input_values=semi_input)
+                final_logits = outputs['last_hidden_state'].mean(1)
+    else:
+        semi_input = inputs['input_values'].to('cuda')
+        #with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.no_grad():
+            outputs = model(input_values=semi_input)
+            final_logits = outputs['last_hidden_state'].mean(1)
+    aud_frames = final_logits
     return aud_frames
 
 
@@ -149,13 +149,25 @@ def maybe_get_audio_frames(data_items, n_segments=1):
             return
     return
 
-
-s = time.time()
-for batch_idx in tqdm.trange(total_length // STORE_BATCH_SIZE):
-    data_items = []
-    for jdx in range(STORE_BATCH_SIZE):
-        real_jdx = batch_idx * STORE_BATCH_SIZE + jdx
-        data_items.append(pt_db_list[real_jdx])
-    maybe_get_video_frames(data_items=data_items, n_segments=N_SEGMENTS)
-t = time.time() - s
-print(t)
+if EXTRACTED_MODALITY == 'Video':
+    s = time.time()
+    for batch_idx in tqdm.trange(total_length // STORE_BATCH_SIZE):
+        data_items = []
+        for jdx in range(STORE_BATCH_SIZE):
+            real_jdx = batch_idx * STORE_BATCH_SIZE + jdx
+            data_items.append(pt_db_list[real_jdx])
+        maybe_get_video_frames(data_items=data_items, n_segments=N_SEGMENTS)
+    t = time.time() - s
+    print(t)
+elif EXTRACTED_MODALITY == 'Audio':
+    s = time.time()
+    for batch_idx in tqdm.trange(total_length // STORE_BATCH_SIZE):
+        data_items = []
+        for jdx in range(STORE_BATCH_SIZE):
+            real_jdx = batch_idx * STORE_BATCH_SIZE + jdx
+            data_items.append(pt_db_list[real_jdx])
+        maybe_get_audio_frames(data_items=data_items, n_segments=1)
+    t = time.time() - s
+    print(t)
+else:
+    raise NotImplementedError

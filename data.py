@@ -4,9 +4,9 @@ from typing import List, Dict, Any
 
 import tqdm
 
-from utils import load_db_json, get_video_frames
+from utils import load_db_json, get_video_frames, get_audio_frames
 from transformers import AutoImageProcessor, TimesformerForVideoClassification, VideoMAEForVideoClassification, \
-    VideoMAEImageProcessor
+    VideoMAEImageProcessor, AutoFeatureExtractor, HubertModel
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,7 +16,7 @@ class PerceptionDataset:
     """Dataset class to store video items from dataset.
 
     Attributes:
-      video_folder: Path to the folder containing the videos.
+      video_folder: Path to the folder containing the video / audio files.
       task: Task type for annotations.
       split: Dataset split to load.
       pt_db_list: List containing annotations for dataset according to
@@ -24,7 +24,7 @@ class PerceptionDataset:
     """
 
     def __init__(self, pt_db_dict: Dict[str, Any], video_folder: str,
-                 task: str, split: str, js_only: bool) -> None:
+                 task: str, split: str, js_only: bool, use_audio: bool = False, auto_unload: bool = True) -> None:
         """Initializes the PerceptionDataset class.
 
         Args:
@@ -33,16 +33,48 @@ class PerceptionDataset:
           task (str): Task type for annotations.
           split (str): Dataset split to load.
           js_only (bool): Whether we load the full dataset or only the json-related description
+          use_audio (bool): Whether we load the audio of each video segment
+          auto_unload (bool): Whether we unload the video/audio encoder after every use (saves space, makes everything super slow)
         """
         self.js_only = js_only
         self.video_folder = video_folder
         self.task = task
         self.split = split
         self.pt_db_list = self.load_dataset(pt_db_dict)
-        self.processor = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
-        self.model = VideoMAEForVideoClassification.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
-        self.model.classifier = nn.Identity()
-        self.model = self.model.to('cuda').half()
+        self.video_load_flag = False
+        self.audio_load_flag = False
+        self.use_audio = use_audio
+        self.auto_unload = auto_unload
+
+    def __unload_on_demand__(self, modality):
+        if modality == 'video':
+            self.video_processor = None
+            self.video_model = None
+            torch.cuda.empty_cache()
+            self.video_load_flag = False
+        elif modality == 'audio':
+            self.audio_processor = None
+            self.audio_model = None
+            torch.cuda.empty_cache()
+            self.audio_load_flag = False
+        else:
+            raise ValueError(f'Argument modality should be video/audio... you gave {modality}\n')
+
+    def __load_on_demand__(self, modality):
+        if modality == 'video':
+            self.video_processor = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base-finetuned-kinetics")
+            self.video_model = VideoMAEForVideoClassification.from_pretrained(
+                "MCG-NJU/videomae-base-finetuned-kinetics")
+            self.video_model.classifier = nn.Identity()
+            self.video_model = self.video_model.to('cuda').half()
+            self.video_load_flag = True
+        elif modality == 'audio':
+            self.audio_processor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+            self.audio_model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
+            self.audio_model = self.audio_model.to('cuda')
+            self.audio_load_flag = True
+        else:
+            raise ValueError(f'Argument modality should be video/audio... you gave {modality}\n')
 
     def load_dataset(self, pt_db_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Loads the dataset from the annotation file and processes.
@@ -73,14 +105,17 @@ class PerceptionDataset:
         return len(self.pt_db_list)
 
     def _get_video_frames(self, data_item):
+        if not self.video_load_flag:
+            self.__load_on_demand__('video')
         N_SEGMENTS = 1
         BATCH_SIZE = 16
         loaded_videos = []
-        vid_frames = get_video_frames(data_item, self.video_folder, override_video_name=False, resize_to=224, num_samples=16, n_segments=N_SEGMENTS)
+        vid_frames = get_video_frames(data_item, self.video_folder, override_video_name=False, resize_to=224,
+                                      num_samples=16, n_segments=N_SEGMENTS)
         for s in range(N_SEGMENTS):
             for f in vid_frames[s]:
                 loaded_videos.append(f)
-        inputs = self.processor(loaded_videos, return_tensors="pt")
+        inputs = self.video_processor(loaded_videos, return_tensors="pt")
         inputs['pixel_values'] = inputs['pixel_values'].resize(N_SEGMENTS, 16, inputs['pixel_values'].size()[2],
                                                                inputs['pixel_values'].size()[3],
                                                                inputs['pixel_values'].size()[4])
@@ -90,7 +125,7 @@ class PerceptionDataset:
                 semi_input = inputs['pixel_values'][i * BATCH_SIZE: (i + 1) * BATCH_SIZE].to('cuda')
                 with torch.cuda.amp.autocast(dtype=torch.float16):
                     with torch.no_grad():
-                        outputs = self.model(pixel_values=semi_input)
+                        outputs = self.video_model(pixel_values=semi_input)
                         logits = outputs.logits
                         for f in logits:
                             final_logits.append(f)
@@ -98,12 +133,47 @@ class PerceptionDataset:
             semi_input = inputs['pixel_values'].to('cuda')
             with torch.cuda.amp.autocast(dtype=torch.float16):
                 with torch.no_grad():
-                    outputs = self.model(pixel_values=semi_input)
+                    outputs = self.video_model(pixel_values=semi_input)
                     logits = outputs.logits
                     for f in logits:
                         final_logits.append(f)
         vid_frames = torch.stack(final_logits, dim=0).mean(0)
+        if self.auto_unload:
+            self.__unload_on_demand__('video')
         return vid_frames
+
+    def _get_audio_frames(self, data_item):
+        if not self.audio_load_flag:
+            self.__load_on_demand__('audio')
+        N_SEGMENTS = 1
+        BATCH_SIZE = 16
+        loaded_audios = []
+        aud_frames = get_audio_frames(data_item, self.video_folder, override_video_name=False, num_samples=None,
+                                      n_segments=1)
+        for s in range(N_SEGMENTS):
+            loaded_audios.append(aud_frames[s])
+        inputs = self.audio_processor(loaded_audios, sampling_rate=16000, return_tensors="pt", padding=True)
+        final_logits = []
+        if N_SEGMENTS >= BATCH_SIZE:
+            for i in range(N_SEGMENTS // BATCH_SIZE):
+                semi_input = inputs['input_values'][i * BATCH_SIZE: (i + 1) * BATCH_SIZE].to('cuda')
+                with torch.no_grad():
+                    outputs = self.audio_model(input_values=semi_input)
+                    logits = outputs['last_hidden_state'].mean(1)
+                    for f in logits:
+                        final_logits.append(f)
+        else:
+            semi_input = inputs['input_values'].to('cuda')
+            with torch.no_grad():
+                outputs = self.audio_model(input_values=semi_input)
+                logits = outputs['last_hidden_state'].mean(1)
+                for f in logits:
+                    final_logits.append(f)
+
+        aud_frames = torch.stack(final_logits, dim=0).mean(0)
+        if self.auto_unload:
+            self.__unload_on_demand__('audio')
+        return aud_frames
 
     def _maybe_get_video_frames(self, data_item, n_segments=1):
         video_file_pickle = os.path.join(self.video_folder,
@@ -117,6 +187,20 @@ class PerceptionDataset:
             vid_frames = self._get_video_frames(data_item=data_item)
             with open(video_file_pickle, 'wb') as fout:
                 pickle.dump(vid_frames, fout)
+        return vid_frames
+
+    def _maybe_get_audio_frames(self, data_item, n_segments=1):
+        audio_file_pickle = os.path.join(self.video_folder,
+                                         data_item['metadata']['video_id']) + f'_audioseg_{n_segments}.pkl'
+        if os.path.exists(audio_file_pickle):
+            # Unpickle and return
+            with open(audio_file_pickle, 'rb') as fin:
+                vid_frames = pickle.load(fin)
+        else:
+            # Get video frame and store
+            aud_frames = self._get_audio_frames(data_item=data_item)
+            with open(audio_file_pickle, 'wb') as fout:
+                pickle.dump(aud_frames, fout)
         return vid_frames
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
@@ -147,11 +231,21 @@ class PerceptionDataset:
         # the commented out function below will actually load frames
         if self.js_only:
             vid_frames = torch.rand(size=(1, 768))
+            if self.use_audio:
+                aud_frames = torch.rand(size=(1, 768))
+            else:
+                aud_frames = None
         else:
             vid_frames = self._maybe_get_video_frames(data_item=data_item, n_segments=1)
+            if self.use_audio:
+                aud_frames = self._maybe_get_audio_frames(data_item=data_item, n_segments=1)
+            else:
+                aud_frames = None
         return {'metadata': metadata,
                 self.task: annot,
-                'frames': vid_frames}
+                'frames': vid_frames,
+                'audio': aud_frames
+                }
 
 
 def test_dataset_with_json_only():
@@ -182,6 +276,21 @@ def test_dataset_with_video():
     print("End")
 
 
+def test_dataset_with_video_and_audio():
+    cfg = {'video_folder': './data/train/videos/',
+           'task': 'mc_question',
+           'split': 'train',
+           'js_only': False,
+           'use_audio': True,
+           }
+
+    train_db_path = 'data/mc_question_train.json'
+    train_db_dict = load_db_json(train_db_path)
+    dataset = PerceptionDataset(train_db_dict, **cfg)
+    for item in tqdm.tqdm(dataset):
+        pass
+    print("End")
+
 if __name__ == '__main__':
     # test_dataset_with_json_only()
-    test_dataset_with_video()
+    test_dataset_with_video_and_audio()

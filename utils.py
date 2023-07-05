@@ -1,7 +1,7 @@
 # """
 ###
 # @title Serialize Example Results File
-# Writing model outputs in the expected competition format. This
+# Writing video_model outputs in the expected competition format. This
 # JSON file contains answers to all questions in the validation split in the
 # format:
 #
@@ -217,6 +217,23 @@ def load_mp4_to_frames(filename: str, indices=None, resize_to=None) -> np.array:
     return frames
 
 
+def load_mp4_to_audioframes(filename: str, indices=None) -> np.array:
+    """Loads an MP4 video file and returns its audio frames as a NumPy array.
+
+    Args:
+      filename (str): Path to the MP4 video file.
+
+    Returns:
+      np.array: Frames of the video as a NumPy array.
+    """
+
+    ar = de.AudioReader(filename, ctx=ctx, sample_rate=16000, mono=True)
+    if indices is None:
+        indices = list(range(len(ar)))
+    frames = ar.get_batch(indices).asnumpy()
+    return frames
+
+
 def get_video_frames(data_item: Dict[str, Any],
                      video_folder_path: str,
                      override_video_name: bool = False, resize_to=None, num_samples=16, n_segments=1) -> np.array:
@@ -286,27 +303,6 @@ def get_audio_frames(data_item: Dict[str, Any],
     indices = list(range(0, t))
     return ar.get_batch(indices=indices).asnumpy()
 
-
-
-# def video_temporal_subsample(
-#         x: np.ndarray, num_samples: int, temporal_dim: int = 0, n_segments: int = 1):
-#     """
-#     Uniformly subsamples num_samples indices from the temporal dimension of the video.
-#     Returns:
-#         An x-like with subsampled temporal dimension.
-#     """
-#     t = x.shape[temporal_dim]
-#     assert num_samples > 0 and t > 0
-#     # Sample by nearest neighbor interpolation if num_samples > t.
-#     parts = []
-#     for i in range(n_segments):
-#         indices = np.linspace(i * (t // n_segments), (i + 1) * ((t // n_segments) - 1), num_samples)
-#         indices = np.clip(indices, i * (t // n_segments), (i + 1) * ((t // n_segments) - 1)).astype(int)
-#         for f in np.take(x, indices, axis=temporal_dim).astype('uint8'):
-#             parts.append(f)
-#     return parts
-
-
 def test_video(valid_db_dict, video_id='video_8241'):
     video_path = 'data/sample/videos/'
     video_item = valid_db_dict[video_id]
@@ -331,7 +327,6 @@ def test_video(valid_db_dict, video_id='video_8241'):
             print('Tag: ', example_q['tag'])
             print('area: ', example_q['area'])
             print('---------------------------------')
-
 
 
 def calc_top(answers_dict: Dict[str, Any],
@@ -481,22 +476,22 @@ def test_download_samples():
     # valid_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/valid_videos.zip'
     # download_and_unzip(valid_videos_url, data_path)
 
+
 # gather_answers(['./data/mc_question_train.json', './data/mc_question_valid.json'])
 
 
-x = get_audio_frames(None, './data/sample/videos/', override_video_name=True)
-
-from transformers import AutoFeatureExtractor, HubertModel
-import torch
-
-
-feature_extractor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
-model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
-
-# audio file is decoded on the fly
-inputs = feature_extractor(x[0][0], sampling_rate=16000, return_tensors="pt")
-
-with torch.no_grad():
-    logits = model(**inputs)['last_hidden_state'].mean(1)
-
-print(logits.size())
+# x = get_audio_frames(None, './data/sample/videos/', override_video_name=True)
+#
+# from transformers import AutoFeatureExtractor, HubertModel
+# import torch
+#
+# feature_extractor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+# video_model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
+#
+# # audio file is decoded on the fly
+# inputs = feature_extractor(x[0][0], sampling_rate=16000, return_tensors="pt")
+#
+# with torch.no_grad():
+#     logits = video_model(**inputs)['last_hidden_state'].mean(1)
+#
+# print(logits.size())

@@ -65,51 +65,30 @@ class EncoderBlock(nn.Module):
 
         return q
 
-
-class StrippedEncoderBlock(nn.Module):
+class NoBrainEncoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.temp = nn.Parameter(data=torch.ones(1, ), requires_grad=True)
+        self.temp = nn.Parameter(data=0.4 * torch.ones(1, device='cuda'), requires_grad=True)
 
-    def forward(self, q, k, v):
-        dk = q.size()[-1]
-        scores = q.matmul(k.transpose(-2, -1)) / (self.temp * math.sqrt(dk))
-        attention = F.softmax(scores, dim=-1)
-        y = attention.matmul(v)
-        return y
-
+    def forward(self, q1, k1, q2, k2, **args):
+        a = self.temp
+        q1 = torch.nn.functional.normalize(q1, p=2, dim=-1)
+        k1 = torch.nn.functional.normalize(k1, p=2, dim=-1)
+        q2 = torch.nn.functional.normalize(q2, p=2, dim=-1)
+        k2 = torch.nn.functional.normalize(k2, p=2, dim=-1)
+        scores1 = torch.nn.functional.cosine_similarity(q1.unsqueeze(1), k1, dim=-1)
+        scores1 = torch.clip(scores1, 0, 1)
+        scores2 = torch.nn.functional.cosine_similarity(q2.unsqueeze(1), k2, dim=-1)
+        scores2 = torch.clip(scores2, 0, 1)
+        attention1 = F.softmax(scores1, dim=-1)
+        attention2 = F.softmax(scores2, dim=-1)
+        attention = attention1 * a + (1 - a) * attention2
+        return attention
 
 class MultiRetrievalAugmentedEmbedding(nn.Module):
-    def __init__(self, v_dim=768, aud_dim=768, l_dim=384, o_dim=None):
+    def __init__(self):
         super().__init__()
-        self.v_dim = v_dim
-        self.aud_dim = aud_dim
-        self.q_dim = l_dim
-        if o_dim is None:
-            self.o_dim = self.q_dim
-        else:
-            self.o_dim = o_dim
-        self.emb_dim = min(self.v_dim, self.q_dim, self.l_dim, self.aud_dim, self.o_dim)
-
-        self.common_dropout = nn.Dropout1d(p=0.0)
-        # Common VISION BLOCKS #
-        self.common_vision_backbone = nn.Identity()
-        self.v_block = nn.Sequential(self.common_vision_backbone)
-        self.v2_block = nn.Sequential(self.common_vision_backbone, self.common_dropout)
-
-        self.q_block = nn.Identity()
-
-        # Common OPTION BLOCKS #
-        # self.common_option_backbone = nn.Sequential(nn.Linear(self.o_dim, self.emb_dim))
-        self.common_option_backbone = nn.Identity()
-        # self.common_option_backbone = nn.Identity()
-        self.o_block = nn.Sequential(self.common_option_backbone)
-        self.o2_block = nn.Sequential(self.common_option_backbone, self.common_dropout)
-
-        self.calc_block = EncoderBlock(embed_dim=self.emb_dim, num_heads=16, dropout=0.1, add_skip=False)
-        self.score_block = EncoderBlock(embed_dim=self.emb_dim, num_heads=16, dropout=0.1, add_skip=False)
-        self.transform_block = nn.Sequential(nn.Linear(self.v_dim + self.q_dim + self.o_dim, 128), nn.ReLU(),
-                                             nn.Dropout(p=0.5), nn.Linear(128, 1))
+        self.bb = NoBrainEncoderBlock()
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3)
 
@@ -141,31 +120,29 @@ class MultiRetrievalAugmentedEmbedding(nn.Module):
             gt = gt.squeeze(1)
         return self.metric_fn(scores, gt)
 
-    def forward(self, v, q, o, n_ids=None, n_feats=None, n_answ=None,
-                gt_answer_int=None, gt_answer_emb=None):
+    def forward(self,
+                v,
+                aud,
+                o=None,
+                n_feats=None,
+                n_answ=None,
+                n_auds=None,
+                gt_answer_int=None, **args):
         #################################################################################
-        v = self.v_block(v)
-        # nv = self.v2_block(n_feats)
-        q = self.q_block(q)
-        o = self.o_block(o)
-        # n_answ = self.o2_block(n_answ)
-        combination1 = torch.cat([v, q, o[:, 0, :]], dim=1)
-        combination2 = torch.cat([v, q, o[:, 1, :]], dim=1)
-        combination3 = torch.cat([v, q, o[:, 2, :]], dim=1)
-        score_0 = self.transform_block(combination1)
-        score_1 = self.transform_block(combination2)
-        score_2 = self.transform_block(combination3)
-        ########################################
-        # answer = self.calc_block(v, nv, n_answ)
-        # aggr = self.score_block(answer, o, o).squeeze(1)
+        aggr = self.bb(q1=v, k1=n_feats, q2=aud, k2=n_auds)
         #########################################
-        # score_0 = aggr * o[:, 0, :]  # BS, E
-        # score_0 = score_0.sum(1).unsqueeze(1)
-        # score_1 = aggr * o[:, 1, :]  # BS, E
-        # score_1 = score_1.sum(1).unsqueeze(1)
-        # score_2 = aggr * o[:, 2, :]  # BS, E
-        # score_2 = score_2.sum(1).unsqueeze(1)
-        scores = torch.cat([score_0, score_1, score_2], dim=1)
+        if not o is None and not n_answ is None:
+            aggr = aggr.unsqueeze(2) * n_answ
+            aggr = aggr.sum(1)
+            score_0 = aggr * o[:, 0, :]  # BS, E
+            score_0 = score_0.sum(1).unsqueeze(1)
+            score_1 = aggr * o[:, 1, :]  # BS, E
+            score_1 = score_1.sum(1).unsqueeze(1)
+            score_2 = aggr * o[:, 2, :]  # BS, E
+            score_2 = score_2.sum(1).unsqueeze(1)
+            scores = torch.cat([score_0, score_1, score_2], dim=1)
+        else:
+            scores = aggr
 
         if gt_answer_int is not None:
             loss = self.calc_loss(scores, gt_answer_int)
@@ -365,9 +342,9 @@ class DbAudLearnDataset(Dataset):
                     for _ in range(pad_length):
                         neighbour_ids.append(-1)
                         neighbour_feats = torch.concat(
-                            [neighbour_feats, torch.zeros(size=(1, neighbour_feats.size(-1)))], dim=-2)
+                            [neighbour_feats, torch.zeros(size=(1, neighbour_feats.size(-1)), device='cpu')], dim=-2)
                         neighbour_audio = torch.concat(
-                            [neighbour_audio, torch.zeros(size=(1, neighbour_audio.size(-1)), device='cuda')], dim=-2)
+                            [neighbour_audio, torch.zeros(size=(1, neighbour_audio.size(-1)), device='cpu')], dim=-2)
                         # neighbour_answers.append(torch.zeros(size=(answer_embs[0].size(-1),)))
                         neighbour_answers.append(0)
 
@@ -406,13 +383,13 @@ class VideoAudioFreqLearnMCVQA:
 
     def __init__(self, train_dataset, model_emb='all-MiniLM-L12-v2', look_for_one_hot=True):
         self.lfoh = look_for_one_hot
-        self.video_emb_answer_db = self.build_video_answer_db(train_dataset)
+        self.video_emb_answer_db = self.build_video_answer_db_2(train_dataset)
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
-        self.model = MultiRetrievalAugmentedEmbedding(v_dim=768, aud_dim=768, l_dim=384, o_dim=6370)
+        self.model = MultiRetrievalAugmentedEmbedding()
         self.model.to(device='cuda')
-        self.model.train()
+        #self.model.train()
 
-    def build_video_answer_db(self, dataset) -> Dict[str, Any]:
+    def build_video_answer_db_2(self, dataset) -> Dict[str, Any]:
         """Builds a Video / Audio Embedding - Answer database.
 
         Returns a dictionary where the key is the question string and the value
@@ -430,9 +407,9 @@ class VideoAudioFreqLearnMCVQA:
         if self.lfoh:
             print('Loading Answer Dict...\n')
             with open(ANSWER_DATA_PATH, 'r') as fin:
-                answer_data_json = json.load(fin)
+                self.answer_data_json = json.load(fin)
         else:
-            answer_data_json = None
+            self.answer_data_json = None
 
         question_db = {}
         print("Building Video Audio Dataset...\n")
@@ -445,7 +422,7 @@ class VideoAudioFreqLearnMCVQA:
                                                          'answer_int': [], 'options': []}
 
                 if self.lfoh:
-                    answer = answer_data_json[question['options'][question['answer_id']]]['int_index']
+                    answer = self.answer_data_json[question['options'][question['answer_id']]]['int_index']
                 else:
                     answer = question['options'][question['answer_id']]
 
@@ -454,7 +431,7 @@ class VideoAudioFreqLearnMCVQA:
                 audio_emb = entry['audio'].cpu()
 
                 if self.lfoh:
-                    options = [answer_data_json[f]['int_index'] for f in question['options']]
+                    options = [self.answer_data_json[f]['int_index'] for f in question['options']]
                 else:
                     options = question['options']
                 question_db[question['question']]['video_emb'].append(video_emb)
@@ -492,7 +469,7 @@ class VideoAudioFreqLearnMCVQA:
                                 collate_fn=dataset.custom_collate_fn)
 
         if val_external_dataset is not None:
-            val_dataloader = DataLoader(dataset=dataset, batch_size=bs, shuffle=False, pin_memory=False,
+            val_dataloader = DataLoader(dataset=dataset, batch_size=512, shuffle=False, pin_memory=False,
                                         collate_fn=dataset.custom_collate_fn)
 
         optimizer = torch.optim.Adam(params=self.model.parameters(), lr=lr)
@@ -501,23 +478,39 @@ class VideoAudioFreqLearnMCVQA:
         for epoch_idx in range(epochs):
             epoch_loss = 0
             epoch_metric = 0
-            for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
-                real_index = (epoch_idx * len(dataloader)) + step_idx
-                v, aud, q, o, n_ids, n_feats, n_answ, gt_answer_int, gt_answer_emb = batch['v'], batch['aud'], batch[
-                    'q'], batch['o'], \
-                    batch['n_ids'], batch[
-                    'n_feats'], batch['n_answers'], batch['gt_answer_int'], batch['gt_answer_emb']
-                logits, loss, metric = self.model(v=v, aud=aud, q=q, o=o, n_ids=n_ids, n_feats=n_feats, n_answ=n_answ,
-                                                  gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
-                epoch_loss += loss.detach().item()
-                epoch_metric += metric.detach().item()
-                pbar.set_postfix(
-                    {'Epoch': epoch_idx, 'Step': real_index, 'Loss': epoch_loss / (step_idx + 1),
-                     'Accuracy': epoch_metric / (step_idx + 1)})
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-            if epoch_idx % 2 == 1 and val_external_dataset is not None:
+            # for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
+            #     real_index = (epoch_idx * len(dataloader)) + step_idx
+            #     v, \
+            #         aud, \
+            #         q, \
+            #         o, \
+            #         n_ids, \
+            #         n_feats, \
+            #         n_answ, \
+            #         n_auds, \
+            #         gt_answer_int, \
+            #         gt_answer_emb = batch['v'], \
+            #         batch['aud'], \
+            #         batch['q'], \
+            #         batch['o'], \
+            #         batch['n_ids'], \
+            #         batch['n_feats'], \
+            #         batch['n_answers'], \
+            #         batch['n_auds'], \
+            #         batch['gt_answer_int'], \
+            #         batch['gt_answer_emb']
+            #     _, loss, metric = self.model(v=v, aud=aud, q=q, o=o, n_ids=n_ids, n_feats=n_feats, n_answ=n_answ,
+            #                                  n_auds=n_auds,
+            #                                  gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
+            #     epoch_loss += loss.detach().item()
+            #     epoch_metric += metric.detach().item()
+            #     pbar.set_postfix(
+            #         {'Epoch': epoch_idx, 'Step': real_index, 'Loss': epoch_loss / (step_idx + 1),
+            #          'Accuracy': epoch_metric / (step_idx + 1)})
+            #     loss.backward()
+            #     optimizer.step()
+            #     optimizer.zero_grad()
+            if epoch_idx % 1 == 0 and val_external_dataset is not None:
                 avg_loss = 0
                 avg_metric = 0
                 self.model.eval()
@@ -526,16 +519,35 @@ class VideoAudioFreqLearnMCVQA:
 
                     print("[VALIDATION] ---------------")
                     for step_idx, batch in enumerate(pbar := tqdm.tqdm(val_dataloader)):
-                        v, q, o, n_ids, n_feats, n_answ, gt_answer_int, gt_answer_emb = batch['v'], batch['q'], batch[
-                            'o'], \
-                            batch['n_ids'], batch[
-                            'n_feats'], batch['n_answers'], batch['gt_answer_int'], batch['gt_answer_emb']
-                        logits, loss, metric = self.model(v=v, q=q, o=o, n_ids=n_ids, n_feats=n_feats, n_answ=n_answ,
-                                                          gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
+                        v, \
+                            aud, \
+                            q, \
+                            o, \
+                            n_ids, \
+                            n_feats, \
+                            n_answ, \
+                            n_auds, \
+                            gt_answer_int, \
+                            gt_answer_emb = batch['v'], \
+                            batch['aud'], \
+                            batch['q'], \
+                            batch['o'], \
+                            batch['n_ids'], \
+                            batch['n_feats'], \
+                            batch['n_answers'], \
+                            batch['n_auds'], \
+                            batch['gt_answer_int'], \
+                            batch['gt_answer_emb']
+                        _, loss, metric = self.model(v=v, aud=aud, q=q, o=o, n_ids=n_ids, n_feats=n_feats,
+                                                     n_answ=n_answ,
+                                                     n_auds=n_auds,
+                                                     gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
                         avg_loss += loss.detach().item()
                         avg_metric += metric.detach().item()
                         pbar.set_postfix(
-                            {'Epoch': epoch_idx, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
+                            {'Epoch': epoch_idx,
+                             'Step': step_idx,
+                             'Loss': avg_loss / (step_idx + 1),
                              'Accuracy': avg_metric / (step_idx + 1)})
                 dataset.set_train_mode()
                 self.model.train()
@@ -572,3 +584,111 @@ class VideoAudioFreqLearnMCVQA:
                     {'Epoch': 0, 'Step': step_idx, 'Loss': avg_loss / (step_idx + 1),
                      'Accuracy': avg_metric / (step_idx + 1)})
         return
+
+    def answer_q(self, a,
+                 frames,
+                 question,
+                 audio_frames=None,
+                 option_frames=None,
+                 shots=0,
+                 top_k=None,
+                 temp=1,
+                 pre_softmax=False,
+                 post_softmax=False,
+                 approximate_gt_options=False, **args):
+        """
+            Answer a multiple choice question.
+            :param sample: Whether to sample or use argmax
+            :param top_k: Filter the top-k similar results
+            :param temp: Use temp when sampling
+        """
+        assert shots >= -1
+
+        ### Look in the DB for the same question ###
+        stored_response = self.video_emb_answer_db[question['question']]
+        ### Rank answers based on incoming Frame ###
+
+        if len(stored_response['video_emb'][0].size()) == 1:
+            db_frames = torch.stack(stored_response['video_emb'], dim=0)
+        elif len(stored_response['video_emb'][0].size()) == 2:
+            db_frames = torch.cat(stored_response['video_emb'], dim=0)
+        if audio_frames is not None:
+            if len(stored_response['audio_emb'][0].size()) == 1:
+                audb_frames = torch.stack(stored_response['audio_emb'], dim=0)
+            elif len(stored_response['audio_emb'][0].size()) == 2:
+                audb_frames = torch.cat(stored_response['audio_emb'], dim=0)
+        if option_frames is not None:
+            no_frames = stored_response['answer']
+
+        _frames = frames.unsqueeze(0).to('cpu')
+        _audio_frames = audio_frames.unsqueeze(0).to('cpu')
+        _db_frames = db_frames.unsqueeze(0).to('cpu')
+        _audb_frames = audb_frames.unsqueeze(0).to('cpu')
+        ### Fix incoming frames ###
+        if not self.answer_data_json is None and option_frames is not None:
+            o_ = torch.Tensor([self.answer_data_json[f]['int_index'] for f in option_frames])
+            o_ = torch.nn.functional.one_hot(o_, num_classes=6370).squeeze(1)
+            o_ = o_.float()
+        with torch.no_grad():
+            _sim_scores, _, _ = self.model(
+                v=_frames,
+                aud=_audio_frames,
+                o=o_,
+                n_feats=_db_frames,
+                n_answ=_no_frames,
+                n_auds=_audb_frames,
+                gt_answer_int=None)
+        sim_scores = _sim_scores.squeeze()
+
+        ### Use Top-K neighbours
+        if top_k is None:
+            top_k = sim_scores.size()[-1]
+        top_neighbours = [f.item() for f in sim_scores.argsort()[-(top_k + 1):]]
+        sum_scores = {}
+        for i, v in enumerate(sim_scores):
+            ### Drop Top-1 MAX ###
+            ### TODO: Remove at Testing ###
+            # if i == max_item_pos:
+            #     v = 0
+            if i not in top_neighbours:
+                v = 0
+            ### ---------------------- ###
+            candidate_answer = stored_response['answer'][i]
+            if candidate_answer not in sum_scores:
+                sum_scores.update({candidate_answer: v})
+            else:
+                sum_scores[candidate_answer] += v
+        if self.answer_data_json is None:
+            candidate_options = [f for f in question['options']]
+        else:
+            candidate_options = [self.answer_data_json[f]['int_index'] for f in question['options']]
+
+
+        new_answer_list = []
+        new_answer_logits = []
+        max_pos = -1
+        max_val = -1
+        idx = 0
+
+        for k, v in sum_scores.items():
+            if k in candidate_options:
+                new_answer_list.append(k)
+                new_answer_logits.append(v)
+                if v > max_val:
+                    max_val = v
+                    max_pos = idx
+                idx += 1
+
+        answer_idx = [max_pos]
+
+        answer = []
+        answer_id = []
+        for a in answer_idx:
+            try:
+                answer.append(new_answer_list[a])
+                answer_id.append(candidate_options.index(new_answer_list[a]))
+            except:
+                ra = 0
+                answer.append(candidate_options[ra])
+                answer_id.append(ra)
+        return answer_id, answer

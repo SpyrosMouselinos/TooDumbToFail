@@ -1,4 +1,5 @@
 import copy
+import json
 import os.path
 import pickle
 import random
@@ -6,10 +7,34 @@ from typing import Dict, Any, Tuple
 import numpy as np
 import sentence_transformers.util
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
 from sentence_transformers import SentenceTransformer
 import re
+
+ANSWER_DATA_PATH = './data/answer_keys.json'
+
+
+class NoBrainEncoderBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.temp = nn.Parameter(data=0.4 * torch.ones(1, ), requires_grad=True)
+
+    def forward(self, q1, k1, q2, k2, **args):
+        a = self.temp
+        q1 = torch.nn.functional.normalize(q1, p=2, dim=-1)
+        k1 = torch.nn.functional.normalize(k1, p=2, dim=-1)
+        q2 = torch.nn.functional.normalize(q2, p=2, dim=-1)
+        k2 = torch.nn.functional.normalize(k2, p=2, dim=-1)
+        scores1 = torch.nn.functional.cosine_similarity(q1.unsqueeze(1), k1, dim=-1)
+        scores1 = torch.clip(scores1, 0, 1)
+        scores2 = torch.nn.functional.cosine_similarity(q2.unsqueeze(1), k2, dim=-1)
+        scores2 = torch.clip(scores2, 0, 1)
+        attention1 = F.softmax(scores1, dim=-1)
+        attention2 = F.softmax(scores2, dim=-1)
+        attention = attention1 * a + (1 - a) * attention2
+        return attention
 
 
 class FreqMCVQABaseline:
@@ -125,8 +150,11 @@ class VideoFreqMCVQABaseline:
     """Multiple-Choice vQA Model (Frequency Baseline with Video Assistance)"""
 
     def __init__(self, train_dataset, model_sim='all-MiniLM-L12-v2'):
-        self.video_emb_answer_db = self.build_video_answer_db(train_dataset)
+        self.lfoh = True
+        self.video_emb_answer_db = self.build_video_answer_db_2(train_dataset)
         self.sentence_transformer = SentenceTransformer(f'sentence-transformers/{model_sim}')
+        self.model = NoBrainEncoderBlock()
+
 
     def build_video_answer_db(self, dataset) -> Dict[str, Any]:
         """Builds a Video Embedding - Answer database.
@@ -150,12 +178,67 @@ class VideoFreqMCVQABaseline:
                 try:
                     question_db[question['question']]
                 except KeyError:
-                    question_db[question['question']] = {'video_emb': [], 'answer': []}
+                    question_db[question['question']] = {'video_emb': [], 'audio_emb': [], 'answer': []}
 
                 answer = question['options'][question['answer_id']]
                 video_emb = entry['frames'].cpu()
+                audio_emb = entry['audio'].cpu()
                 question_db[question['question']]['video_emb'].append(video_emb)
+                question_db[question['question']]['audio_emb'].append(audio_emb)
                 question_db[question['question']]['answer'].append(answer)
+
+        return question_db
+
+    def build_video_answer_db_2(self, dataset) -> Dict[str, Any]:
+        """Builds a Video / Audio Embedding - Answer database.
+
+        Returns a dictionary where the key is the question string and the value
+        is a list of strings, each string a correct answer to a previous
+        instance of the question.
+
+        Args:
+            dataset (PerceptionDataset): A dataset generator that provides video embeddings, questions and answers
+
+        Returns:
+            Dict[str, Any]: Dictionary where the key is question string and
+            the value is list of full correct answers each time that question
+            was asked in the db_dict.
+        """
+        if self.lfoh:
+            print('Loading Answer Dict...\n')
+            with open(ANSWER_DATA_PATH, 'r') as fin:
+                self.answer_data_json = json.load(fin)
+        else:
+            self.answer_data_json = None
+
+        question_db = {}
+        print("Building Video Audio Dataset...\n")
+        for entry in tqdm.tqdm(dataset):
+            for question in entry['mc_question']:
+                try:
+                    question_db[question['question']]
+                except KeyError:
+                    question_db[question['question']] = {'video_emb': [], 'audio_emb': [], 'answer': [],
+                                                         'answer_int': [], 'options': []}
+
+                if self.lfoh:
+                    answer = self.answer_data_json[question['options'][question['answer_id']]]['int_index']
+                else:
+                    answer = question['options'][question['answer_id']]
+
+                answer_int = int(question['answer_id'])
+                video_emb = entry['frames'].cpu()
+                audio_emb = entry['audio'].cpu()
+
+                if self.lfoh:
+                    options = [self.answer_data_json[f]['int_index'] for f in question['options']]
+                else:
+                    options = question['options']
+                question_db[question['question']]['video_emb'].append(video_emb)
+                question_db[question['question']]['audio_emb'].append(audio_emb)
+                question_db[question['question']]['answer'].append(answer)
+                question_db[question['question']]['answer_int'].append(answer_int)
+                question_db[question['question']]['options'].append(options)
 
         return question_db
 
@@ -189,8 +272,16 @@ class VideoFreqMCVQABaseline:
 
         return replaced_string
 
-    def answer_q(self, frames, question, sample=False,
-                 shots=0, top_k=None, temp=1, use_gt_options=True, approximate_gt_options=False):
+    def answer_q(self, a,
+                 frames,
+                 question,
+                 audio_frames=None,
+                 shots=0,
+                 top_k=None,
+                 temp=1,
+                 pre_softmax=False,
+                 post_softmax=False,
+                 approximate_gt_options=False, **args):
         """
             Answer a multiple choice question.
             :param sample: Whether to sample or use argmax
@@ -202,21 +293,29 @@ class VideoFreqMCVQABaseline:
         ### Look in the DB for the same question ###
         stored_response = self.video_emb_answer_db[question['question']]
         ### Rank answers based on incoming Frame ###
-        db_frames = torch.stack(stored_response['video_emb'], dim=0)
 
         if len(stored_response['video_emb'][0].size()) == 1:
             db_frames = torch.stack(stored_response['video_emb'], dim=0)
         elif len(stored_response['video_emb'][0].size()) == 2:
             db_frames = torch.cat(stored_response['video_emb'], dim=0)
+        if audio_frames is not None:
+            if len(stored_response['audio_emb'][0].size()) == 1:
+                audb_frames = torch.stack(stored_response['audio_emb'], dim=0)
+            elif len(stored_response['audio_emb'][0].size()) == 2:
+                audb_frames = torch.cat(stored_response['audio_emb'], dim=0)
 
+        _frames = frames.unsqueeze(0).to('cpu')
+        _audio_frames = audio_frames.unsqueeze(0).to('cpu')
+        _db_frames = db_frames.unsqueeze(0).to('cpu')
+        _audb_frames = audb_frames.unsqueeze(0).to('cpu')
         ### Fix incoming frames ###
-        frames = frames.to('cpu')
-        if len(frames.size()) == 1:
-            frames = frames.unsqueeze(0)
-        normalised_frames = torch.nn.functional.normalize(frames, p=2, dim=-1)
-        normalised_db_frames = torch.nn.functional.normalize(db_frames, p=2, dim=-1)
-        sim_scores = F.cosine_similarity(normalised_frames, normalised_db_frames)
-        sim_scores = torch.clip(sim_scores, 0, 1)
+        with torch.no_grad():
+            _sim_scores = self.model(
+                q1=_frames,
+                k1=_db_frames,
+                q2=_audio_frames,
+                k2=_audb_frames)
+        sim_scores = _sim_scores.squeeze()
 
         ### Use Top-K neighbours
         if top_k is None:
@@ -236,20 +335,11 @@ class VideoFreqMCVQABaseline:
                 sum_scores.update({candidate_answer: v})
             else:
                 sum_scores[candidate_answer] += v
+        if self.answer_data_json is None:
+            candidate_options = [f for f in question['options']]
+        else:
+            candidate_options = [self.answer_data_json[f]['int_index'] for f in question['options']]
 
-        candidate_options = [f for f in question['options']]
-
-        if approximate_gt_options:
-            for k in candidate_options:
-                if k not in sum_scores:
-                    emb_k = self.sentence_transformer.encode(k, batch_size=1, convert_to_tensor=True,
-                                                             device='cuda').cpu()
-                    emb_known_responses = self.sentence_transformer.encode(list(sum_scores.keys()), batch_size=32,
-                                                                           convert_to_tensor=True,
-                                                                           device='cuda').cpu()
-                    sim_scores_coef = F.softmax(sentence_transformers.util.cos_sim(emb_k, emb_known_responses))
-                    sim_scores_score = sim_scores_coef * torch.Tensor([v for _, v in sum_scores.items()])
-                    sum_scores.update({k: sim_scores_score.sum()})
 
         new_answer_list = []
         new_answer_logits = []
@@ -266,17 +356,7 @@ class VideoFreqMCVQABaseline:
                     max_pos = idx
                 idx += 1
 
-        if sample:
-            p = F.softmax(torch.Tensor(new_answer_logits) / temp, dim=-1)
-            dist = torch.distributions.categorical.Categorical(probs=p, logits=None,
-                                                               validate_args=None)
-            if shots == 0:
-                shots = 1  # Compatibility Fix
-                answer_idx = [dist.sample(sample_shape=(shots,)).item()]
-            else:
-                answer_idx = dist.sample(sample_shape=(shots,))
-        else:
-            answer_idx = [max_pos]
+        answer_idx = [max_pos]
 
         answer = []
         answer_id = []

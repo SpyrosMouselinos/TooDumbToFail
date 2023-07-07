@@ -195,13 +195,13 @@ class PerceptionDataset:
         if os.path.exists(audio_file_pickle):
             # Unpickle and return
             with open(audio_file_pickle, 'rb') as fin:
-                vid_frames = pickle.load(fin)
+                aud_frames = pickle.load(fin)
         else:
             # Get video frame and store
             aud_frames = self._get_audio_frames(data_item=data_item)
             with open(audio_file_pickle, 'wb') as fout:
                 pickle.dump(aud_frames, fout)
-        return vid_frames
+        return aud_frames
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Returns the video and annotations for a given index.

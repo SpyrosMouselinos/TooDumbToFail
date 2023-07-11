@@ -154,6 +154,7 @@ class VideoFreqMCVQABaseline:
         self.video_emb_answer_db = self.build_video_answer_db_2(train_dataset)
         self.sentence_transformer = SentenceTransformer(f'sentence-transformers/{model_sim}')
         self.model = NoBrainEncoderBlock()
+        self.model.to('cuda')
 
 
     def build_video_answer_db(self, dataset) -> Dict[str, Any]:

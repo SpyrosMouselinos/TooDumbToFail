@@ -166,11 +166,11 @@ class MultiRetrievalAugmentedEmbedding(nn.Module):
         aggr = self.tkg(aggr)
         #########################################
         if not o is None and not n_answ is None:
-            aggr_ = aggr.unsqueeze(2) * n_answ
+            aggr_ = aggr.unsqueeze(2)
+            aggr_ = aggr_ * n_answ
             aggr_ = aggr_.sum(1)
             score_0 = aggr_ * o[:, 0, :]  # BS, E
             score_0 = score_0.sum(1).unsqueeze(1)
-            ### SuperHack ###
             score_1 = aggr_ * o[:, 1, :]  # BS, E
             score_1 = score_1.sum(1).unsqueeze(1)
             score_2 = aggr_ * o[:, 2, :]  # BS, E
@@ -474,19 +474,10 @@ class IterableLookUp(Dataset):
                 cached_audio_frames = torch.stack(cached_question_items['audio_emb'], dim=0)
 
                 # Get the Answers from it #
-                cached_answer_frames = cached_question_items['answer_int']
+                cached_answer_frames = cached_question_items['answer']
                 cached_answer_frames = torch.nn.functional.one_hot(torch.LongTensor([cached_answer_frames]),
                                                                    num_classes=6370)
                 cached_answer_frames = cached_answer_frames.float()
-
-                # Calculate the cosine similarity #
-                video_cosine_similarity = F.cosine_similarity(active_video_frames.cpu(), cached_video_frames.cpu(),
-                                                              dim=-1)
-                video_cosine_similarity = torch.clip(video_cosine_similarity, 0, 1)
-
-                # Find top k neighbours #
-                # max_item_pos = video_cosine_similarity.argmax().item()
-                # top_neighbours = [f.item() for f in video_cosine_similarity.argsort()[-self.top_k:]]
 
                 # Find top k video frames #
                 top_k_video_frames = cached_video_frames
@@ -500,18 +491,18 @@ class IterableLookUp(Dataset):
 
                 # PAD
                 #pad_length = self.top_k - len(top_neighbours)
-                pad_length = 688 - len(top_neighbours)
-                if pad_length > 0:
-                    for _ in range(pad_length):
-                        top_k_video_frames = torch.concat(
-                            [top_k_video_frames, torch.zeros(size=(1, top_k_video_frames.size(-1)), device='cpu')],
-                            dim=-2)
-                        top_k_audio_frames = torch.concat(
-                            [top_k_audio_frames, torch.zeros(size=(1, top_k_audio_frames.size(-1)), device='cpu')],
-                            dim=-2)
-                        top_k_answers = torch.concat(
-                            [top_k_answers, torch.zeros(size=(1, top_k_answers.size(-1)), device='cpu')],
-                            dim=-2)
+                # pad_length = 688 - top_k_video_frames.size()[0]
+                # if pad_length > 0:
+                #     for _ in range(pad_length):
+                #         top_k_video_frames = torch.concat(
+                #             [top_k_video_frames, torch.zeros(size=(1, top_k_video_frames.size(-1)), device='cpu')],
+                #             dim=-2)
+                #         top_k_audio_frames = torch.concat(
+                #             [top_k_audio_frames, torch.zeros(size=(1, top_k_audio_frames.size(-1)), device='cpu')],
+                #             dim=-2)
+                #         top_k_answers = torch.concat(
+                #             [top_k_answers, torch.zeros(size=(1, top_k_answers.size(-1)), device='cpu')],
+                #             dim=-2)
 
                 db.update({idx: {
                     'v': active_video_frames.squeeze(0),
@@ -754,13 +745,13 @@ class VideoAudioFreqLearnMCVQA:
                     n_feats, \
                     n_answ, \
                     n_auds, \
-                    gt_answer_int, n_ids = batch['v'], \
+                    gt_answer_int = batch['v'], \
                     batch['aud'], \
                     batch['o'], \
                     batch['n_feats'], \
                     batch['n_answers'], \
                     batch['n_auds'], \
-                    batch['gt_answer_int'], batch['n_ids']
+                    batch['gt_answer_int']
                 _sim_scores, _, _ = self.model(v=v,
                                                aud=aud,
                                                o=o,

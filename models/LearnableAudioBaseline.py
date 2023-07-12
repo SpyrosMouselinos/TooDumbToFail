@@ -18,7 +18,7 @@ def save_checkpoint(state, filename='checkpoint'):
     torch.save(state, filename + '.pth')
 
 
-class EncoderBlock(nn.Module):
+class EncoderBlockV1(nn.Module):
     def __init__(self, embed_dim, num_heads, dim_feedforward=None, dropout=0.1, add_skip=False):
         """
         Args:
@@ -67,29 +67,169 @@ class EncoderBlock(nn.Module):
         return q
 
 
+class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
+    def __init__(self, v_dim=768, l_dim=384, o_dim=None):
+        super().__init__()
+        self.v_dim = v_dim
+        self.q_dim = l_dim
+        if o_dim is None:
+            self.o_dim = self.q_dim
+        else:
+            self.o_dim = o_dim
+        self.emb_dim = self.v_dim
+        # Common Dropout #
+        self.common_dropout = nn.Dropout1d(p=0.0)
+        # Common VISION BLOCKS #
+        self.v_block = nn.Identity()
+        self.q_block = nn.Identity()
+        self.o_block = nn.Identity()
+        self.transform_block = nn.Sequential(nn.Linear(self.v_dim + self.q_dim + self.o_dim, 128), nn.ReLU(),
+                                             nn.Dropout(p=0.5), nn.Linear(128, 1))
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
+
+    def calc_loss(self, scores, gt):
+        """
+        Calculate Cross-Entropy Loss
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+
+        return self.loss_fn(scores, gt)
+
+    def calc_acc(self, scores, gt):
+        """
+        Calculate Accuracy
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+        scores = scores.argmax(dim=-1)
+        if len(scores.size()) > 1:
+            scores = scores.squeeze(1)
+        return self.metric_fn(scores, gt)
+
+    def forward(self, v, q, o, gt_answer_int=None, **args):
+        v = self.v_block(v)
+        q = self.q_block(q)
+        o = self.o_block(o)
+        combination1 = torch.cat([v, q, o[:, 0, :]], dim=1)
+        combination2 = torch.cat([v, q, o[:, 1, :]], dim=1)
+        combination3 = torch.cat([v, q, o[:, 2, :]], dim=1)
+        score_0 = self.transform_block(combination1)
+        score_1 = self.transform_block(combination2)
+        score_2 = self.transform_block(combination3)
+        scores = torch.cat([score_0, score_1, score_2], dim=1)
+        if gt_answer_int is not None:
+            loss = self.calc_loss(scores, gt_answer_int)
+            metric = self.calc_acc(scores, gt_answer_int)
+            return scores, loss, metric
+        return scores, None, None
+
+
+class EncoderBlockV2(nn.Module):
+    def __init__(self, embed_dims, num_heads, dim_feedforwards=None, out_dims=None, dropout=0.1, add_skip=False):
+        """
+        Args:
+            input_dim: Dimensionality of the input
+            num_heads: Number of heads to use in the attention block
+            dim_feedforward: Dimensionality of the hidden layer in the MLP
+            dropout: Dropout probability to use in the dropout layers
+        """
+        super().__init__()
+        self.add_skip = add_skip  # Whether to add skip connection at the layer
+        # Attention layer
+        self.self_attn1 = nn.MultiheadAttention(embed_dim=embed_dims[0], num_heads=num_heads, dropout=dropout,
+                                                batch_first=True,
+                                                device='cuda')
+        self.self_attn2 = nn.MultiheadAttention(embed_dim=embed_dims[1], num_heads=num_heads, dropout=dropout,
+                                                batch_first=True,
+                                                device='cuda')
+        self.temp = nn.Parameter(data=0.5 * torch.ones(1, device='cuda'), requires_grad=True)
+
+        if dim_feedforwards is None:
+            dim_feedforwards = [2 * embed_dims[0], 2 * embed_dims[1]]
+
+        if out_dims is None:
+            out_dims = dim_feedforwards
+
+        # Two-layer MLP
+        self.linear_net1 = nn.Sequential(
+            nn.Linear(embed_dims[0], dim_feedforwards[0]),
+            nn.Dropout(dropout),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim_feedforwards[0], out_dims[0]),
+        )
+        self.linear_net2 = nn.Sequential(
+            nn.Linear(embed_dims[1], dim_feedforwards[1]),
+            nn.Dropout(dropout),
+            nn.ReLU(inplace=True),
+            nn.Linear(dim_feedforwards[1], out_dims[1]),
+        )
+
+        # Layers to apply in between the main layers
+        self.norm11 = nn.LayerNorm(out_dims[0])
+        self.norm12 = nn.LayerNorm(out_dims[1])
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, q1, k1, v1, q2, k2, v2, mask=None, **args):
+        # Attention part
+        a = torch.nn.functional.sigmoid(self.temp)
+        attn_out1, _ = self.self_attn1(query=q1, key=k1, value=v1)
+        attn_out2, _ = self.self_attn2(query=q2, key=k2, value=v2)
+        if self.add_skip1:
+            q1 = q1 + self.dropout(attn_out1)
+            q1 = self.norm11(q1)
+        else:
+            q1 = attn_out1
+
+        if self.add_skip2:
+            q2 = q2 + self.dropout(attn_out2)
+            q2 = self.norm12(q2)
+        else:
+            q2 = attn_out2
+
+        # # MLP part
+        # linear_out = self.linear_net(q)
+        # q = q + self.dropout(linear_out)
+        # q = self.norm2(q)
+        out = q1 * a + (1 - a) * q2
+        return out
+
+
 class NoBrainEncoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.temp = nn.Parameter(data=0.4 * torch.ones(1, device='cuda'), requires_grad=True)
+        self.temp = nn.Parameter(data=0.5 * torch.ones(1, device='cuda'), requires_grad=True)
 
     def forward(self, q1, k1, q2, k2, mask=None, **args):
-        a = self.temp
+        a = torch.nn.functional.sigmoid(self.temp)
         q1 = torch.nn.functional.normalize(q1, p=2, dim=-1)
         k1 = torch.nn.functional.normalize(k1, p=2, dim=-1)
-        # q2 = torch.nn.functional.normalize(q2, p=2, dim=-1)
-        # k2 = torch.nn.functional.normalize(k2, p=2, dim=-1)
+        q2 = torch.nn.functional.normalize(q2, p=2, dim=-1)
+        k2 = torch.nn.functional.normalize(k2, p=2, dim=-1)
         scores1 = torch.nn.functional.cosine_similarity(q1.unsqueeze(1), k1, dim=-1)
         if mask is not None:
             scores1 *= mask
         scores1 = torch.clip(scores1, 0, 1)
-        # scores2 = torch.nn.functional.cosine_similarity(q2.unsqueeze(1), k2, dim=-1)
-        # if mask is not None:
-        #     scores2 *= mask
-        # scores2 = torch.clip(scores2, 0, 1)
+        scores2 = torch.nn.functional.cosine_similarity(q2.unsqueeze(1), k2, dim=-1)
+        if mask is not None:
+            scores2 *= mask
+        scores2 = torch.clip(scores2, 0, 1)
         attention1 = F.softmax(scores1, dim=-1)
-        # attention2 = F.softmax(scores2, dim=-1)
-        # attention = attention1 * a + (1 - a) * attention2
-        return attention1
+        attention2 = F.softmax(scores2, dim=-1)
+        attention = attention1 * a + (1 - a) * attention2
+        return attention
 
 
 class TopKGroup(nn.Module):
@@ -107,7 +247,7 @@ class TopKGroup(nn.Module):
         return score_vector
 
 
-class MultiRetrievalAugmentedEmbedding(nn.Module):
+class MultiRetrievalAugmentedEmbeddingV2(nn.Module):
     def __init__(self):
         super().__init__()
         self.bb = NoBrainEncoderBlock()
@@ -184,224 +324,6 @@ class MultiRetrievalAugmentedEmbedding(nn.Module):
             metric = self.calc_acc(scores, gt_answer_int)
             return scores, loss, metric
         return scores, None, None
-
-
-class DbAudLearnDataset(Dataset):
-    def __init__(self,
-                 active_db,
-                 cached_db,
-                 model_emb,
-                 top_k=25):
-        self.model_emb = model_emb
-        self.top_k = top_k
-        if active_db is not None and cached_db is not None:
-            print("Reordering Cached and After DB...\n")
-            self.reorder_db(active=active_db, cached=cached_db)
-        elif active_db is not None and cached_db is None:
-            print("Reordering Active DB...\n")
-            self.reorder_db(active=active_db, cached=None)
-        else:
-            raise ValueError
-        return
-
-    @staticmethod
-    def custom_collate_fn(batch):
-        KEYS = batch[0].keys()
-        NEW_BATCH = {k: [] for k in KEYS}
-        forbidden_key = 'none'
-        for entry in batch:
-            for k, v in entry.items():
-                if isinstance(v, torch.Tensor):
-                    pass
-                elif isinstance(v, list):
-                    if isinstance(v[0], int):
-                        v = torch.LongTensor(v)
-                    else:
-                        v = torch.stack(v, dim=0)
-                elif isinstance(v, int):
-                    v = torch.LongTensor([v])
-                elif isinstance(v, str):
-                    forbidden_key = k
-                    pass
-                v = v.to('cuda') if not isinstance(v, str) else v
-                NEW_BATCH[k].append(v)
-
-        for k in KEYS:
-            if k != forbidden_key:
-                NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
-        # Expand Options #
-        NEW_BATCH['o'] = torch.nn.functional.one_hot(NEW_BATCH['o'], num_classes=6370).squeeze(1).to('cuda')
-        NEW_BATCH['o'] = NEW_BATCH['o'].float()
-        NEW_BATCH['n_answers'] = torch.nn.functional.one_hot(NEW_BATCH['n_answers'], num_classes=6370).squeeze(1).to(
-            'cuda')
-        NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].float()
-        return NEW_BATCH
-
-    def reorder_db(self, active, cached):
-        if cached is None:
-            self.reorder_train(active)
-        else:
-            self.reorder_train(cached)
-            self.reorder_test(active)
-        return
-
-    def reorder_train(self, dataset):
-        idx = 0
-        db = {}
-
-        # For each question in the dataset #
-        for question_index, (question, question_items) in enumerate(tqdm.tqdm(dataset.items())):
-            db_frames = torch.stack(question_items['video_emb'], dim=0)
-            audb_frames = torch.stack(question_items['audio_emb'], dim=0)
-            # Pre-calc Similarities #
-            db_frames = db_frames.to('cuda')
-            audb_frames = audb_frames.to('cuda')
-
-            sim_scores_global = F.cosine_similarity(db_frames[None, :], db_frames[:, None], dim=-1)
-            sim_scores_global = torch.clip(sim_scores_global, 0, 1).cpu()
-
-            answer_embs = question_items['answer']
-            options_emb = [k for f in question_items['options'] for k in f]
-
-            for inter_question_index, (frame, audio, answer_int) in enumerate(
-                    zip(question_items['video_emb'],
-                        question_items['audio_emb'],
-                        question_items['answer_int'])):
-
-                sim_scores = sim_scores_global[inter_question_index]
-                max_item_pos = sim_scores.argmax().item()
-                top_neighbours = [f.item() for f in sim_scores.argsort()[-self.top_k:] if not f == max_item_pos]
-
-                ### Gather Neighbour similarity Tensor ###
-                current_q = question
-                current_f = frame
-                current_aud = audio
-                current_o = [
-                    options_emb[inter_question_index * 3],
-                    options_emb[inter_question_index * 3 + 1],
-                    options_emb[inter_question_index * 3 + 2]
-                ]
-
-                neighbour_ids = top_neighbours
-                neighbour_feats = db_frames[top_neighbours]
-                neighbour_audio = audb_frames[top_neighbours]
-                neighbour_answers = [answer_embs[f] for f in top_neighbours]
-                gt_answer_int = answer_int
-
-                # PAD
-                pad_length = self.top_k - len(neighbour_ids)
-                if pad_length > 0:
-                    for _ in range(pad_length):
-                        neighbour_ids.append(-1)
-                        neighbour_feats = torch.concat(
-                            [neighbour_feats, torch.zeros(size=(1, neighbour_feats.size(-1)), device='cuda')], dim=-2)
-                        neighbour_audio = torch.concat(
-                            [neighbour_audio, torch.zeros(size=(1, neighbour_audio.size(-1)), device='cuda')], dim=-2)
-                        neighbour_answers.append(0)
-
-                db.update({idx: {
-                    'question_idx': question_index,
-                    'inter_question_idx': inter_question_index,
-                    'v': current_f,
-                    'aud': current_aud,
-                    'q': current_q,
-                    'o': current_o,
-                    'n_ids': neighbour_ids,
-                    'n_feats': neighbour_feats,
-                    'n_auds': neighbour_audio,
-                    'n_answers': neighbour_answers,
-                    'gt_answer_int': gt_answer_int,
-                }})
-                idx += 1
-        self.active_db_reordered = db
-        return
-
-    def reorder_test(self, dataset):
-        idx = 0
-        db = {}
-        # Pre-calc Questions #
-        question_embs = self.model_emb.encode(list(self.video_emb_val_db.keys()),
-                                              batch_size=32,
-                                              convert_to_tensor=True,
-                                              device='cuda').to('cpu')
-
-        # For each question in the eval DB, find the same in the train DB #
-        for ij_eval, (question_eval, stored_response_eval) in enumerate(tqdm.tqdm(self.video_emb_val_db.items())):
-            # Look for the same in the Train DB #
-            for ij_train, (question_train, stored_response_train) in enumerate(
-                    self.video_emb_answer_db.items()):
-                if question_eval == question_train:
-                    db_frames_eval = torch.stack(stored_response_eval['video_emb'], dim=0).to('cpu')
-                    db_frames_train = torch.stack(stored_response_train['video_emb'], dim=0).to('cpu')
-                    audb_frames_train = torch.stack(stored_response_train['audio_emb'], dim=0).to('cpu')
-                    break
-
-            question_emb = question_embs[ij_eval]
-            # Pre-calc Similarities #
-            x = db_frames_eval[:, None]
-            y = db_frames_train[None, :]
-            sim_scoress = F.cosine_similarity(x, y, dim=-1)
-            sim_scoress = torch.clip(sim_scoress, 0, 1).cpu()
-
-            answer_embs = stored_response_train['answer']
-            options_emb = [k for f in stored_response_eval['options'] for k in f]
-
-            for jk, (frame, audio, answer_int) in enumerate(
-                    zip(stored_response_eval['video_emb'], stored_response_eval['audio_emb'],
-                        stored_response_eval['answer_int'])):
-                sim_scores = sim_scoress[jk]
-                if top_k is None:
-                    top_k = sim_scores.size()[-1]
-                max_item_pos = sim_scores.argmax().item()
-                top_neighbours = [f.item() for f in sim_scores.argsort()[-(top_k + 1):] if not f == max_item_pos]
-
-                ### Gather Neighbour similarity Tensor ###
-                current_f = frame
-                current_aud = audio
-                current_q = question_emb
-                current_o = [options_emb[jk * 3], options_emb[jk * 3 + 1], options_emb[jk * 3 + 2]]
-
-                neighbour_ids = top_neighbours
-                neighbour_feats = db_frames_train[top_neighbours]
-                neighbour_audio = audb_frames_train[top_neighbours]
-                neighbour_answers = [answer_embs[f] for f in top_neighbours]
-                gt_answer_int = answer_int
-                gt_answer_emb = current_o[answer_int]
-
-                # PAD
-                pad_length = top_k - len(neighbour_ids)
-                if pad_length > 0:
-                    for _ in range(pad_length):
-                        neighbour_ids.append(-1)
-                        neighbour_feats = torch.concat(
-                            [neighbour_feats, torch.zeros(size=(1, neighbour_feats.size(-1)), device='cpu')], dim=-2)
-                        neighbour_audio = torch.concat(
-                            [neighbour_audio, torch.zeros(size=(1, neighbour_audio.size(-1)), device='cpu')], dim=-2)
-                        # neighbour_answers.append(torch.zeros(size=(answer_embs[0].size(-1),)))
-                        neighbour_answers.append(0)
-
-                db.update({idx: {
-                    'v': current_f,
-                    'aud': current_aud,
-                    'q': current_q,
-                    'o': current_o,
-                    'n_ids': neighbour_ids,
-                    'n_feats': neighbour_feats,
-                    'n_auds': neighbour_audio,
-                    'n_answers': neighbour_answers,
-                    'gt_answer_int': gt_answer_int,
-                    'gt_answer_emb': gt_answer_emb
-                }})
-                idx += 1
-        return db
-
-    def __len__(self):
-        return len(self.active_db_reordered)
-
-    def __getitem__(self, idx):
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
-        return self.active_db_reordered[idx]
 
 
 class IterableLookUp(Dataset):
@@ -501,8 +423,7 @@ class IterableLookUp(Dataset):
                 #             [top_k_audio_frames, torch.zeros(size=(1, top_k_audio_frames.size(-1)), device='cpu')],
                 #             dim=-2)
                 #         top_k_answers = torch.concat(
-                #             [top_k_answers, torch.zeros(size=(1, top_k_answers.size(-1)), device='cpu')],
-                #             dim=-2)
+                #             [top_k_answers, torch.zeros(size=(1,), device='cpu')])
 
                 db.update({idx: {
                     'v': active_video_frames.squeeze(0),
@@ -533,9 +454,8 @@ class VideoAudioFreqLearnMCVQA:
     def __init__(self, active_ds, cache_ds=None, model_emb='all-MiniLM-L12-v2', look_for_one_hot=True):
         self.lfoh = look_for_one_hot
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
-        self.model = MultiRetrievalAugmentedEmbedding()
+        self.model = MultiRetrievalAugmentedEmbeddingV2()
         self.model.to(device='cuda')
-        self.model.train()
         self._active_ds = copy.deepcopy(active_ds)
         if cache_ds is not None:
             self._cache_ds = self.build_video_answer_db_2(cache_ds)
@@ -596,33 +516,20 @@ class VideoAudioFreqLearnMCVQA:
         return question_db
 
     def fit(self, lr=0.0005, bs=128, epochs=100, val_external_dataset=None):
-        if val_external_dataset is not None:
-            if os.path.exists('aved.pkl.ds'):
-                with open('aved.pkl.ds', 'rb') as fin:
-                    dataset = pickle.load(fin)
-            else:
-                external_video_emb_answer_db = self.build_video_answer_db_2(val_external_dataset)
-                dataset = DbAudLearnDataset(video_emb_answer_db=self.video_emb_answer_db,
-                                            video_emb_val_db=external_video_emb_answer_db,
-                                            model_emb=self.embedding_transformer)
-                # with open('aved.pkl.ds', 'wb') as fout:
-                #     pickle.dump(dataset, fout)
-        else:
-            if os.path.exists('aned.pkl.ds'):
-                with open('aned.pkl.ds', 'rb') as fin:
-                    dataset = pickle.load(fin)
-            else:
-                dataset = DbAudLearnDataset(active_db=self.video_emb_answer_db,
-                                            cached_db=None,
-                                            model_emb=self.embedding_transformer)
-        dataloader = DataLoader(dataset=dataset, batch_size=bs, shuffle=True, pin_memory=False,
+        FIXED_BATCH_SIZE = 1
+        self.model.train()
+        dataset = IterableLookUp(active_db=self._active_ds,
+                                 cached_db=self._cache_ds,
+                                 model_emb=self.embedding_transformer,
+                                 answer_data_json=self.answer_data_json)
+
+        dataloader = DataLoader(dataset=dataset,
+                                batch_size=FIXED_BATCH_SIZE,
+                                shuffle=True,
+                                pin_memory=False,
                                 collate_fn=dataset.custom_collate_fn)
 
-        if val_external_dataset is not None:
-            val_dataloader = DataLoader(dataset=dataset, batch_size=512, shuffle=False, pin_memory=False,
-                                        collate_fn=dataset.custom_collate_fn)
-
-        optimizer = torch.optim.Adam(params=self.model.parameters(), lr=lr)
+        optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=lr)
         optimizer.zero_grad()
 
         for epoch_idx in range(epochs):
@@ -632,75 +539,39 @@ class VideoAudioFreqLearnMCVQA:
                 real_index = (epoch_idx * len(dataloader)) + step_idx
                 v, \
                     aud, \
-                    q, \
                     o, \
-                    n_ids, \
                     n_feats, \
                     n_answ, \
                     n_auds, \
-                    gt_answer_int, \
-                    gt_answer_emb, n_ids = batch['v'], \
+                    gt_answer_int = batch['v'], \
                     batch['aud'], \
-                    batch['q'], \
                     batch['o'], \
-                    batch['n_ids'], \
                     batch['n_feats'], \
                     batch['n_answers'], \
                     batch['n_auds'], \
-                    batch['gt_answer_int'], \
-                    batch['gt_answer_emb'], batch['n_ids']
-                _, loss, metric = self.model(v=v, aud=aud, q=q, o=o, n_ids=n_ids, n_feats=n_feats, n_answ=n_answ,
+                    batch['gt_answer_int']
+                _, loss, metric = self.model(v=v,
+                                             aud=aud,
+                                             o=o,
+                                             n_ids=None,
+                                             n_feats=n_feats,
+                                             n_answ=n_answ,
                                              n_auds=n_auds,
-                                             gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
+                                             gt_answer_int=gt_answer_int)
+
                 epoch_loss += loss.detach().item()
                 epoch_metric += metric.detach().item()
                 pbar.set_postfix(
                     {'Epoch': epoch_idx, 'Step': real_index, 'Loss': epoch_loss / (step_idx + 1),
                      'Accuracy': epoch_metric / (step_idx + 1)})
+                loss = loss / bs
                 loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-            if epoch_idx % 5 == 4 and val_external_dataset is not None:
-                avg_loss = 0
-                avg_metric = 0
-                self.model.eval()
-                dataset.set_eval_mode()
-                with torch.no_grad():
+                if ((step_idx + 1) % bs == 0) or (step_idx + 1 == len(dataloader)):
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-                    print("[VALIDATION] ---------------")
-                    for step_idx, batch in enumerate(pbar := tqdm.tqdm(val_dataloader)):
-                        v, \
-                            aud, \
-                            q, \
-                            o, \
-                            n_ids, \
-                            n_feats, \
-                            n_answ, \
-                            n_auds, \
-                            gt_answer_int, \
-                            gt_answer_emb = batch['v'], \
-                            batch['aud'], \
-                            batch['q'], \
-                            batch['o'], \
-                            batch['n_ids'], \
-                            batch['n_feats'], \
-                            batch['n_answers'], \
-                            batch['n_auds'], \
-                            batch['gt_answer_int'], \
-                            batch['gt_answer_emb']
-                        _, loss, metric = self.model(v=v, aud=aud, q=q, o=o, n_ids=n_ids, n_feats=n_feats,
-                                                     n_answ=n_answ,
-                                                     n_auds=n_auds,
-                                                     gt_answer_int=gt_answer_int, gt_answer_emb=gt_answer_emb)
-                        avg_loss += loss.detach().item()
-                        avg_metric += metric.detach().item()
-                        pbar.set_postfix(
-                            {'Epoch': epoch_idx,
-                             'Step': step_idx,
-                             'Loss': avg_loss / (step_idx + 1),
-                             'Accuracy': avg_metric / (step_idx + 1)})
-                dataset.set_train_mode()
-                self.model.train()
+            # END OF EPOCH EVAL #
+            #self.eval(val_external_dataset)
 
         # Save At End of Final Epoch #
         save_checkpoint({
@@ -712,20 +583,20 @@ class VideoAudioFreqLearnMCVQA:
         self.model.eval()
         return
 
-    def eval(self, bs=512):
+    def eval(self, val_dataset=None):
+        FIXED_BATCH_SIZE = 1
         self.model.eval()
-        avg_loss = 0
-        avg_metric = 0
-        if os.path.exists('aved.pkl.ds'):
-            with open('aved.pkl.ds', 'rb') as fin:
-                dataset = pickle.load(fin)
+        if val_dataset is None:
+            active_db = self._active_ds
         else:
-            dataset = IterableLookUp(active_db=self._active_ds,
-                                     cached_db=self._cache_ds,
-                                     model_emb=self.embedding_transformer, answer_data_json=self.answer_data_json)
+            active_db = val_dataset
+        dataset = IterableLookUp(active_db=active_db,
+                                 cached_db=self._cache_ds,
+                                 model_emb=self.embedding_transformer,
+                                 answer_data_json=self.answer_data_json)
 
         dataloader = DataLoader(dataset=dataset,
-                                batch_size=bs,
+                                batch_size=FIXED_BATCH_SIZE,
                                 shuffle=False,
                                 pin_memory=False,
                                 collate_fn=dataset.custom_collate_fn)

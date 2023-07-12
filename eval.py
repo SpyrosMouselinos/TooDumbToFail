@@ -7,8 +7,7 @@ import tqdm
 
 from data import PerceptionDataset
 from models.FreqBaseline import FreqMCVQABaseline, VideoFreqMCVQABaseline, VideoLangMCVQABaseline
-from models.LearnableAudioBaseline import VideoAudioFreqLearnMCVQA, MultiRetrievalAugmentedEmbedding, \
-    test_train_reordering
+from models.LearnableAudioBaseline import VideoAudioFreqLearnMCVQA
 from models.LearnableBaseline import VideoLangLearnMCVQA, VideoFreqLearnMCVQA
 from utils import load_db_json, CAT, calc_top, calc_top_by_cat
 import numpy as np
@@ -35,10 +34,10 @@ valid_cfg = {'video_folder': './data/valid/',
              'use_audio': True,
              }
 val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
-#test_train_reordering(json_ds=train_mc_vqa_dataset)
-model = VideoAudioFreqLearnMCVQA(active_ds=train_mc_vqa_dataset)
-#model.fit(val_external_dataset=None, lr=0.001, bs=256)
-model.eval(bs=1)
+# test_train_reordering(json_ds=train_mc_vqa_dataset)
+model = VideoAudioFreqLearnMCVQA(active_ds=val_mc_vqa_dataset, cache_ds=train_mc_vqa_dataset)
+model.fit(lr=0.001, bs=256, epochs=1, val_external_dataset=None)
+
 # with open('./iterable_debug_2.pt', 'rb') as fin:
 #     debug = pickle.load(fin)
 # results = {}

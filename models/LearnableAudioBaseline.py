@@ -87,8 +87,8 @@ class NoBrainEncoderBlock(nn.Module):
         #     scores2 *= mask
         # scores2 = torch.clip(scores2, 0, 1)
         attention1 = F.softmax(scores1, dim=-1)
-        #attention2 = F.softmax(scores2, dim=-1)
-        #attention = attention1 * a + (1 - a) * attention2
+        # attention2 = F.softmax(scores2, dim=-1)
+        # attention = attention1 * a + (1 - a) * attention2
         return attention1
 
 
@@ -444,6 +444,12 @@ class IterableLookUp(Dataset):
         for k in KEYS:
             if k != forbidden_key:
                 NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
+        # Expand Options #
+        NEW_BATCH['o'] = torch.nn.functional.one_hot(NEW_BATCH['o'], num_classes=6370).squeeze(1).to('cuda')
+        NEW_BATCH['o'] = NEW_BATCH['o'].float()
+        NEW_BATCH['n_answers'] = torch.nn.functional.one_hot(NEW_BATCH['n_answers'], num_classes=6370).squeeze(1).to(
+            'cuda')
+        NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].float()
         return NEW_BATCH
 
     def reorder_db(self, active_db, cached_db):
@@ -462,8 +468,6 @@ class IterableLookUp(Dataset):
                 if self.answer_data_json is not None:
                     active_option_frames = torch.LongTensor(
                         [self.answer_data_json[f]['int_index'] for f in active_option_frames])
-                    active_option_frames = torch.nn.functional.one_hot(active_option_frames, num_classes=6370)
-                    active_option_frames = active_option_frames.float()
                 # Get YOUR GT ANSWER (if any) #
                 active_gt_frames = active_question_items['answer_id']
                 # Get the same question in the cached dataset #
@@ -474,10 +478,7 @@ class IterableLookUp(Dataset):
                 cached_audio_frames = torch.stack(cached_question_items['audio_emb'], dim=0)
 
                 # Get the Answers from it #
-                cached_answer_frames = cached_question_items['answer']
-                cached_answer_frames = torch.nn.functional.one_hot(torch.LongTensor([cached_answer_frames]),
-                                                                   num_classes=6370)
-                cached_answer_frames = cached_answer_frames.float()
+                cached_answer_frames = torch.LongTensor(cached_question_items['answer'])
 
                 # Find top k video frames #
                 top_k_video_frames = cached_video_frames
@@ -490,7 +491,6 @@ class IterableLookUp(Dataset):
                 top_k_answers = top_k_answers
 
                 # PAD
-                #pad_length = self.top_k - len(top_neighbours)
                 # pad_length = 688 - top_k_video_frames.size()[0]
                 # if pad_length > 0:
                 #     for _ in range(pad_length):
@@ -515,12 +515,7 @@ class IterableLookUp(Dataset):
                     'gt_answer_int': active_gt_frames,
                 }})
                 idx += 1
-                if idx == 2:
-                    break
-            break
         self.final_ds = db
-        with open('./iterable_debug_2.pt', 'wb') as fileclose:
-            pickle.dump(self.final_ds, fileclose)
         return
 
     def __len__(self):

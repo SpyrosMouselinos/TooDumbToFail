@@ -12,7 +12,7 @@ from sentence_transformers import SentenceTransformer
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics.classification import MulticlassAccuracy
 from utils import ANSWER_DATA_PATH
-
+import pytorch_model_summary as pms
 
 def save_checkpoint(state, filename='checkpoint'):
     torch.save(state, filename + '.pth')
@@ -76,15 +76,25 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
             self.o_dim = self.q_dim
         else:
             self.o_dim = o_dim
-        self.emb_dim = self.v_dim
+        self.emb_dim = 128
         # Common Dropout #
-        self.common_dropout = nn.Dropout1d(p=0.0)
-        # Common VISION BLOCKS #
-        self.v_block = nn.Identity()
-        self.q_block = nn.Identity()
-        self.o_block = nn.Identity()
-        self.transform_block = nn.Sequential(nn.Linear(self.v_dim + self.q_dim + self.o_dim, 128), nn.ReLU(),
-                                             nn.Dropout(p=0.5), nn.Linear(128, 1))
+        self.common_dropout = nn.Dropout1d(p=0.25)
+        # Common BLOCKS #
+        self.common_vision_base = nn.Linear(self.v_dim, self.emb_dim)
+        self.v_block = nn.Sequential(self.common_vision_base)
+        self.v_block2 = nn.Sequential(self.common_vision_base, self.common_dropout)
+
+        self.common_audio_base = nn.Linear(self.v_dim, self.emb_dim)
+        self.a_block = nn.Sequential(self.common_audio_base)
+        self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
+
+        self.common_option_base = nn.Linear(in_features=6370, out_features=self.emb_dim)
+        self.o_block = nn.Sequential(self.common_option_base)
+        self.o_block2 = nn.Sequential(self.common_option_base, self.common_dropout)
+        # Encoder Blocks#
+        self.visual_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
+        self.audio_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
+        #self.option_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=16, add_skip=False)
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
 
@@ -119,16 +129,26 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
             scores = scores.squeeze(1)
         return self.metric_fn(scores, gt)
 
-    def forward(self, v, q, o, gt_answer_int=None, **args):
+    def forward(self, v, n_feats, aud, n_auds, o, n_answ, gt_answer_int=None, **args):
         v = self.v_block(v)
-        q = self.q_block(q)
+        v2 = self.v_block2(n_feats)
+        aud = self.a_block(aud)
+        aud2 = self.a_block2(n_auds)
         o = self.o_block(o)
-        combination1 = torch.cat([v, q, o[:, 0, :]], dim=1)
-        combination2 = torch.cat([v, q, o[:, 1, :]], dim=1)
-        combination3 = torch.cat([v, q, o[:, 2, :]], dim=1)
-        score_0 = self.transform_block(combination1)
-        score_1 = self.transform_block(combination2)
-        score_2 = self.transform_block(combination3)
+        o2 = self.o_block2(n_answ)
+        #############################################
+        visually_informed_answer = self.visual_encoder(v.unsqueeze(1), v2, o2)
+        audio_informed_answer = self.audio_encoder(aud.unsqueeze(1), aud2, o2)
+        mix_informed_answer = visually_informed_answer + audio_informed_answer
+        options_informed_answer = mix_informed_answer * o
+        options_informed_answer = options_informed_answer.sum(1)
+        #############################################
+        score_0 = options_informed_answer * o[:, 0, :]
+        score_0 = score_0.sum(1).unsqueeze(1)
+        score_1 = options_informed_answer * o[:, 1, :]
+        score_1 = score_1.sum(1).unsqueeze(1)
+        score_2 = options_informed_answer * o[:, 2, :]
+        score_2 = score_2.sum(1).unsqueeze(1)
         scores = torch.cat([score_0, score_1, score_2], dim=1)
         if gt_answer_int is not None:
             loss = self.calc_loss(scores, gt_answer_int)
@@ -210,7 +230,7 @@ class EncoderBlockV2(nn.Module):
 class NoBrainEncoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.temp = nn.Parameter(data=0.5 * torch.ones(1, device='cuda'), requires_grad=True)
+        self.temp = nn.Parameter(data=-0.4054 * torch.ones(1, device='cuda'), requires_grad=True)
 
     def forward(self, q1, k1, q2, k2, mask=None, **args):
         a = torch.nn.functional.sigmoid(self.temp)
@@ -454,8 +474,15 @@ class VideoAudioFreqLearnMCVQA:
     def __init__(self, active_ds, cache_ds=None, model_emb='all-MiniLM-L12-v2', look_for_one_hot=True):
         self.lfoh = look_for_one_hot
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
-        self.model = MultiRetrievalAugmentedEmbeddingV2()
+        self.model = MultiRetrievalAugmentedEmbeddingV1()
         self.model.to(device='cuda')
+        v = torch.zeros(1, 768).to('cuda')
+        aud = torch.zeros(1, 768).to('cuda')
+        o = torch.zeros(1, 3, 6370).to('cuda')
+        n_feats = torch.zeros(1, 25, 768).to('cuda')
+        n_answ = torch.zeros(1, 25, 6370).to('cuda')
+        n_auds = torch.zeros(1, 25, 768).to('cuda')
+        pms.summary(self.model, v, n_feats, aud, n_auds, o, n_answ, show_input=True, print_summary=True)
         self._active_ds = copy.deepcopy(active_ds)
         if cache_ds is not None:
             self._cache_ds = self.build_video_answer_db_2(cache_ds)
@@ -562,7 +589,7 @@ class VideoAudioFreqLearnMCVQA:
                 epoch_loss += loss.detach().item()
                 epoch_metric += metric.detach().item()
                 pbar.set_postfix(
-                    {'Epoch': epoch_idx, 'Step': real_index, 'Loss': epoch_loss / (step_idx + 1),
+                    {'Epoch': epoch_idx, 'Loss': epoch_loss / (step_idx + 1),
                      'Accuracy': epoch_metric / (step_idx + 1)})
                 loss = loss / bs
                 loss.backward()
@@ -571,13 +598,13 @@ class VideoAudioFreqLearnMCVQA:
                     optimizer.zero_grad()
 
             # END OF EPOCH EVAL #
-            #self.eval(val_external_dataset)
+            # self.eval(val_external_dataset)
 
         # Save At End of Final Epoch #
         save_checkpoint({
             'state_dict': self.model.state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, f'video_audio_learnable_baseline')
+        }, f'Val_to_Train_10e.pth')
 
         # Freeze the video_model #
         self.model.eval()

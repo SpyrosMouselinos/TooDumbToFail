@@ -36,8 +36,9 @@ valid_cfg = {'video_folder': './data/valid/',
 val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
 # test_train_reordering(json_ds=train_mc_vqa_dataset)
 model = VideoAudioFreqLearnMCVQA(active_ds=val_mc_vqa_dataset, cache_ds=train_mc_vqa_dataset)
-model.fit(lr=0.001, bs=256, epochs=1, val_external_dataset=None)
-
+model.fit(lr=0.0005, bs=256, epochs=50, val_external_dataset=None)
+model.eval()
+model.eval(train_mc_vqa_dataset)
 # with open('./iterable_debug_2.pt', 'rb') as fin:
 #     debug = pickle.load(fin)
 # results = {}

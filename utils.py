@@ -295,11 +295,6 @@ def get_audio_frames(data_item: Dict[str, Any],
     # You can specify the desired sample rate and channel layout
     ar = de.AudioReader(video_file, ctx=ctx, sample_rate=16000, mono=True)
     t = ar.shape[1]
-    # Does not Make Much Sense to splice it like that...#
-    # for i in range(n_segments):
-    #     indices = np.linspace(i * (t // n_segments), (i + 1) * ((t // n_segments) - 2), num_samples)
-    #     indices = np.clip(indices, i * (t // n_segments), (i + 1) * ((t // n_segments) - 2)).astype(int)
-    #     parts.append(ar.get_batch(indices).asnumpy())
     indices = list(range(0, t))
     return ar.get_batch(indices=indices).asnumpy()
 

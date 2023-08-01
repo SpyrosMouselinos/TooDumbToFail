@@ -51,7 +51,6 @@ else:
     raise NotImplementedError
 
 
-
 def get_video_frames_wrapper(data_items):
     loaded_videos = []
     for i in range(STORE_BATCH_SIZE):

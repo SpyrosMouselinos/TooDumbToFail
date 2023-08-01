@@ -14,6 +14,7 @@ from torchmetrics.classification import MulticlassAccuracy
 from utils import ANSWER_DATA_PATH
 import pytorch_model_summary as pms
 
+
 def save_checkpoint(state, filename='checkpoint'):
     torch.save(state, filename + '.pth')
 
@@ -68,33 +69,39 @@ class EncoderBlockV1(nn.Module):
 
 
 class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
-    def __init__(self, v_dim=768, l_dim=384, o_dim=None):
+    def __init__(self, v_dim=768, l_dim=384, o_dim=None, use_embedding=False, common_droput=0.0, use_aux_loss=0):
         super().__init__()
+        self.use_embedding = use_embedding
         self.v_dim = v_dim
         self.q_dim = l_dim
+        self.common_droput = common_droput
+        self.use_aux_loss = use_aux_loss
         if o_dim is None:
             self.o_dim = self.q_dim
         else:
             self.o_dim = o_dim
         self.emb_dim = 128
         # Common Dropout #
-        self.common_dropout = nn.Dropout1d(p=0.25)
+        self.common_dropout = nn.Dropout1d(p=self.common_droput)
         # Common BLOCKS #
-        self.common_vision_base = nn.Linear(self.v_dim, self.emb_dim)
+        self.common_vision_base = nn.Identity()
         self.v_block = nn.Sequential(self.common_vision_base)
         self.v_block2 = nn.Sequential(self.common_vision_base, self.common_dropout)
 
-        self.common_audio_base = nn.Linear(self.v_dim, self.emb_dim)
+        self.common_audio_base = nn.Identity()
         self.a_block = nn.Sequential(self.common_audio_base)
         self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
 
-        self.common_option_base = nn.Linear(in_features=6370, out_features=self.emb_dim)
-        self.o_block = nn.Sequential(self.common_option_base)
-        self.o_block2 = nn.Sequential(self.common_option_base, self.common_dropout)
+        if not self.use_embedding:
+            self.common_option_base = nn.Linear(6370, 128)
+            self.o_block = nn.Sequential(self.common_option_base)
+            self.o_block2 = nn.Sequential(self.common_option_base, self.common_dropout)
+        else:
+            self.embedding_library = nn.Embedding(num_embeddings=6370, embedding_dim=128)
         # Encoder Blocks#
-        self.visual_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
-        self.audio_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
-        #self.option_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=16, add_skip=False)
+        # self.visual_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
+        # self.audio_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
+        self.join_block_encoder = NoBrainEncoderBlock()
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
 
@@ -134,13 +141,18 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
         v2 = self.v_block2(n_feats)
         aud = self.a_block(aud)
         aud2 = self.a_block2(n_auds)
-        o = self.o_block(o)
-        o2 = self.o_block2(n_answ)
+        if not self.use_embedding:
+            o = self.o_block(o)
+            o2 = self.o_block2(n_answ)
+        else:
+            o = self.embedding_library(o)
+            o2 = self.embedding_library(n_answ)
         #############################################
-        visually_informed_answer = self.visual_encoder(v.unsqueeze(1), v2, o2)
-        audio_informed_answer = self.audio_encoder(aud.unsqueeze(1), aud2, o2)
-        mix_informed_answer = visually_informed_answer + audio_informed_answer
-        options_informed_answer = mix_informed_answer * o
+        # visually_informed_answer = self.visual_encoder(v.unsqueeze(1), v2, o2)
+        # audio_informed_answer = self.audio_encoder(aud.unsqueeze(1), aud2, o2)
+        mix_informed_answer, overconfidence_penalty = self.join_block_encoder(v, v2, aud, aud2)
+        # mix_informed_answer = visually_informed_answer + audio_informed_answer
+        options_informed_answer = mix_informed_answer.unsqueeze(2) * o2
         options_informed_answer = options_informed_answer.sum(1)
         #############################################
         score_0 = options_informed_answer * o[:, 0, :]
@@ -149,88 +161,32 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
         score_1 = score_1.sum(1).unsqueeze(1)
         score_2 = options_informed_answer * o[:, 2, :]
         score_2 = score_2.sum(1).unsqueeze(1)
-        scores = torch.cat([score_0, score_1, score_2], dim=1)
+        if self.use_aux_loss > 0 and self.training:
+            # Hard-Mine N extra embeddings #
+            false_hard_mine = torch.randint(low=0, high=6369, size=(o.size()[0], self.use_aux_loss), device='cuda')
+            false_hard_embeddings = self.embedding_library(false_hard_mine)
+
+            # Attach them to the option_informed_answer #
+            fake_scores = options_informed_answer.repeat(1, self.use_aux_loss, 1) * false_hard_embeddings
+            fake_scores = fake_scores.sum(2)
+            scores = torch.cat([score_0, score_1, score_2, fake_scores], dim=1)
+
+        else:
+            scores = torch.cat([score_0, score_1, score_2], dim=1)
         if gt_answer_int is not None:
             loss = self.calc_loss(scores, gt_answer_int)
-            metric = self.calc_acc(scores, gt_answer_int)
+            metric = self.calc_acc(scores[:, :3], gt_answer_int)
+            if overconfidence_penalty is not None:
+                loss += torch.nn.functional.l1_loss(overconfidence_penalty, torch.zeros_like(overconfidence_penalty, device='cuda'))
             return scores, loss, metric
         return scores, None, None
-
-
-class EncoderBlockV2(nn.Module):
-    def __init__(self, embed_dims, num_heads, dim_feedforwards=None, out_dims=None, dropout=0.1, add_skip=False):
-        """
-        Args:
-            input_dim: Dimensionality of the input
-            num_heads: Number of heads to use in the attention block
-            dim_feedforward: Dimensionality of the hidden layer in the MLP
-            dropout: Dropout probability to use in the dropout layers
-        """
-        super().__init__()
-        self.add_skip = add_skip  # Whether to add skip connection at the layer
-        # Attention layer
-        self.self_attn1 = nn.MultiheadAttention(embed_dim=embed_dims[0], num_heads=num_heads, dropout=dropout,
-                                                batch_first=True,
-                                                device='cuda')
-        self.self_attn2 = nn.MultiheadAttention(embed_dim=embed_dims[1], num_heads=num_heads, dropout=dropout,
-                                                batch_first=True,
-                                                device='cuda')
-        self.temp = nn.Parameter(data=0.5 * torch.ones(1, device='cuda'), requires_grad=True)
-
-        if dim_feedforwards is None:
-            dim_feedforwards = [2 * embed_dims[0], 2 * embed_dims[1]]
-
-        if out_dims is None:
-            out_dims = dim_feedforwards
-
-        # Two-layer MLP
-        self.linear_net1 = nn.Sequential(
-            nn.Linear(embed_dims[0], dim_feedforwards[0]),
-            nn.Dropout(dropout),
-            nn.ReLU(inplace=True),
-            nn.Linear(dim_feedforwards[0], out_dims[0]),
-        )
-        self.linear_net2 = nn.Sequential(
-            nn.Linear(embed_dims[1], dim_feedforwards[1]),
-            nn.Dropout(dropout),
-            nn.ReLU(inplace=True),
-            nn.Linear(dim_feedforwards[1], out_dims[1]),
-        )
-
-        # Layers to apply in between the main layers
-        self.norm11 = nn.LayerNorm(out_dims[0])
-        self.norm12 = nn.LayerNorm(out_dims[1])
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, q1, k1, v1, q2, k2, v2, mask=None, **args):
-        # Attention part
-        a = torch.nn.functional.sigmoid(self.temp)
-        attn_out1, _ = self.self_attn1(query=q1, key=k1, value=v1)
-        attn_out2, _ = self.self_attn2(query=q2, key=k2, value=v2)
-        if self.add_skip1:
-            q1 = q1 + self.dropout(attn_out1)
-            q1 = self.norm11(q1)
-        else:
-            q1 = attn_out1
-
-        if self.add_skip2:
-            q2 = q2 + self.dropout(attn_out2)
-            q2 = self.norm12(q2)
-        else:
-            q2 = attn_out2
-
-        # # MLP part
-        # linear_out = self.linear_net(q)
-        # q = q + self.dropout(linear_out)
-        # q = self.norm2(q)
-        out = q1 * a + (1 - a) * q2
-        return out
 
 
 class NoBrainEncoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
         self.temp = nn.Parameter(data=-0.4054 * torch.ones(1, device='cuda'), requires_grad=True)
+        self.topk = AdaptableTopKGroup(skip_self=True, top_k=1000)
 
     def forward(self, q1, k1, q2, k2, mask=None, **args):
         a = torch.nn.functional.sigmoid(self.temp)
@@ -239,6 +195,7 @@ class NoBrainEncoderBlock(nn.Module):
         q2 = torch.nn.functional.normalize(q2, p=2, dim=-1)
         k2 = torch.nn.functional.normalize(k2, p=2, dim=-1)
         scores1 = torch.nn.functional.cosine_similarity(q1.unsqueeze(1), k1, dim=-1)
+
         if mask is not None:
             scores1 *= mask
         scores1 = torch.clip(scores1, 0, 1)
@@ -249,101 +206,78 @@ class NoBrainEncoderBlock(nn.Module):
         attention1 = F.softmax(scores1, dim=-1)
         attention2 = F.softmax(scores2, dim=-1)
         attention = attention1 * a + (1 - a) * attention2
-        return attention
+        attention, overconfidence_penalty = self.topk(attention)
+        return attention, overconfidence_penalty
 
 
 class TopKGroup(nn.Module):
-    def __init__(self, top_k=25):
+    def __init__(self, skip_self=False, top_k=25):
         super().__init__()
         self.top_k = top_k
+        self.skip_self = skip_self
+        # TODO: Change attribute if this is in training mode
 
     def forward(self, score_vector, **args):
-        _, top_k_indices = torch.topk(score_vector, k=min(self.top_k, score_vector.size()[-1]), dim=-1)
+        if not self.training:
+            skip_self = False
+            top_k = 1000
+        else:
+            if self.skip_self:
+                skip_self = True
+                if self.top_k == 1:
+                    top_k = 2
+                else:
+                    top_k = self.top_k
+        _, top_k_indices = torch.topk(score_vector, k=min(top_k, score_vector.size()[-1]), dim=-1)
+        self_top = score_vector.argmax(-1)
         top_k_indices = top_k_indices.squeeze(0)
         mask = torch.zeros(size=(score_vector.size()[-1],), device='cuda')
         mask[top_k_indices] = 1
+        if skip_self:
+            mask[self_top] = 0
         mask = mask.unsqueeze(0)
         score_vector = score_vector * mask
         return score_vector
 
 
-class MultiRetrievalAugmentedEmbeddingV2(nn.Module):
-    def __init__(self):
+class AdaptableTopKGroup(nn.Module):
+    def __init__(self, max_n_choices=700, tau=1, skip_self=False, device='cuda', top_k=-1):
         super().__init__()
-        self.bb = NoBrainEncoderBlock()
-        self.tkg = TopKGroup()
-        self.loss_fn = torch.nn.CrossEntropyLoss()
-        self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
+        self.device = device
+        self.skip_self = skip_self
+        self.tau = tau
+        self.max_n_choices = max_n_choices
+        self.initializer = torch.arange(start=max_n_choices, end=0, step=-1, device=device).unsqueeze(0)
 
-    def calc_loss(self, scores, gt):
-        """
-        Calculate Cross-Entropy Loss
-        :param scores: The unnormalised logits
-        :param gt: A list of the true labels
-        :return:
-        """
-        if not isinstance(gt, torch.Tensor):
-            gt = torch.LongTensor(gt).to('cuda')
-        if len(gt.size()) > 1:
-            gt = gt.squeeze(1)
+        self.top_k_suggestor = torch.nn.Parameter(data=self.initializer,
+                                                  requires_grad=True,
+                                                  )
 
-        return self.loss_fn(scores, gt)
+    def __repr__(self):
+        return f"Adaptable Layer is inclined to choose {self.top_k_suggestor.argmax(-1)[0].cpu().item()} neighbours!"
 
-    def calc_acc(self, scores, gt):
-        """
-        Calculate Accuracy
-        :param scores: The unnormalised logits
-        :param gt: A list of the true labels
-        :return:
-        """
-
-        if not isinstance(gt, torch.Tensor):
-            gt = torch.LongTensor(gt).to('cuda')
-        if len(gt.size()) > 1:
-            gt = gt.squeeze(1)
-        scores = scores.argmax(dim=-1)
-        if len(scores.size()) > 1:
-            scores = scores.squeeze(1)
-        return self.metric_fn(scores, gt)
-
-    def forward(self,
-                v,
-                aud,
-                o=None,
-                n_feats=None,
-                n_ids=None,
-                n_answ=None,
-                n_auds=None,
-                gt_answer_int=None, **args):
-
-        if n_ids is not None:
-            mask = 1.0 - (1.0 * (n_ids == -1))
-            mask = mask.squeeze(1)
-        else:
-            mask = None
-        #################################################################################
-        aggr = self.bb(q1=v, k1=n_feats, q2=aud, k2=n_auds, mask=mask)
-        aggr = self.tkg(aggr)
-        #########################################
-        if not o is None and not n_answ is None:
-            aggr_ = aggr.unsqueeze(2)
-            aggr_ = aggr_ * n_answ
-            aggr_ = aggr_.sum(1)
-            score_0 = aggr_ * o[:, 0, :]  # BS, E
-            score_0 = score_0.sum(1).unsqueeze(1)
-            score_1 = aggr_ * o[:, 1, :]  # BS, E
-            score_1 = score_1.sum(1).unsqueeze(1)
-            score_2 = aggr_ * o[:, 2, :]  # BS, E
-            score_2 = score_2.sum(1).unsqueeze(1)
-            scores = torch.cat([score_0, score_1, score_2], dim=1)
-        else:
-            scores = aggr
-
-        if gt_answer_int is not None:
-            loss = self.calc_loss(scores, gt_answer_int)
-            metric = self.calc_acc(scores, gt_answer_int)
-            return scores, loss, metric
-        return scores, None, None
+    def forward(self, score_vector, **args):
+        skip_self = self.skip_self and self.training
+        # Old behaviour #
+        _, top_k_indices = torch.topk(score_vector, k=score_vector.size()[-1], dim=-1)
+        self_top = score_vector.argmax(-1)
+        top_k_indices = top_k_indices.squeeze(0)
+        mask = torch.zeros(size=(score_vector.size()[-1],), device=self.device)
+        mask[top_k_indices] = 1
+        if skip_self:
+            mask[self_top] = 0
+        mask = mask.unsqueeze(0)
+        score_vector = score_vector * mask
+        # New behaviour #
+        suggestion_mask = self.top_k_suggestor
+        score_vector = score_vector[torch.arange(score_vector.size(0)).unsqueeze(1), top_k_indices]  # Ordered
+        hard_d = torch.nn.functional.gumbel_softmax(logits=suggestion_mask, tau=self.tau, hard=True, dim=-1)
+        LU_1 = torch.tril(input=torch.ones(size=(self.max_n_choices, self.max_n_choices), device=self.device),
+                          diagonal=0)
+        final_mask = torch.matmul(hard_d, LU_1)
+        score_vector = score_vector * final_mask[:, :score_vector.size()[-1]]
+        overconfidence_penalty = final_mask.sum(-1)
+        return score_vector, overconfidence_penalty
 
 
 class IterableLookUp(Dataset):
@@ -352,7 +286,8 @@ class IterableLookUp(Dataset):
                  cached_db=None,
                  model_emb=None,
                  answer_data_json=None,
-                 top_k=25):
+                 top_k=25, use_embedding=False):
+        self.use_embedding = use_embedding
         self.answer_data_json = answer_data_json
         self.model_emb = model_emb
         self.top_k = top_k
@@ -361,8 +296,7 @@ class IterableLookUp(Dataset):
         self.reorder_db(active_db, cached_db)
         return
 
-    @staticmethod
-    def custom_collate_fn(batch):
+    def custom_collate_fn(self, batch):
         KEYS = batch[0].keys()
         NEW_BATCH = {k: [] for k in KEYS}
         forbidden_key = 'none'
@@ -387,11 +321,16 @@ class IterableLookUp(Dataset):
             if k != forbidden_key:
                 NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
         # Expand Options #
-        NEW_BATCH['o'] = torch.nn.functional.one_hot(NEW_BATCH['o'], num_classes=6370).squeeze(1).to('cuda')
-        NEW_BATCH['o'] = NEW_BATCH['o'].float()
-        NEW_BATCH['n_answers'] = torch.nn.functional.one_hot(NEW_BATCH['n_answers'], num_classes=6370).squeeze(1).to(
-            'cuda')
-        NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].float()
+        if not self.use_embedding:
+            NEW_BATCH['o'] = torch.nn.functional.one_hot(NEW_BATCH['o'], num_classes=6370).squeeze(1).to('cuda')
+            NEW_BATCH['o'] = NEW_BATCH['o'].float()
+            NEW_BATCH['n_answers'] = torch.nn.functional.one_hot(NEW_BATCH['n_answers'], num_classes=6370).squeeze(
+                1).to(
+                'cuda')
+            NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].float()
+        else:
+            NEW_BATCH['o'] = NEW_BATCH['o'].long()
+            NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].long()
         return NEW_BATCH
 
     def reorder_db(self, active_db, cached_db):
@@ -471,16 +410,23 @@ class IterableLookUp(Dataset):
 class VideoAudioFreqLearnMCVQA:
     """Multiple-Choice vQA Model using Video and Audio Inputs, Frequency  and Q/A as embedding pairs"""
 
-    def __init__(self, active_ds, cache_ds=None, model_emb='all-MiniLM-L12-v2', look_for_one_hot=True):
+    def __init__(self, active_ds, cache_ds=None, model_emb='all-MiniLM-L12-v2', look_for_one_hot=True,
+                 use_embedding=False, common_droput=0.0, use_aux_loss=0):
         self.lfoh = look_for_one_hot
+        self.use_embedding = use_embedding
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
-        self.model = MultiRetrievalAugmentedEmbeddingV1()
+        self.model = MultiRetrievalAugmentedEmbeddingV1(use_embedding=use_embedding, common_droput=common_droput,
+                                                        use_aux_loss=use_aux_loss)
         self.model.to(device='cuda')
         v = torch.zeros(1, 768).to('cuda')
         aud = torch.zeros(1, 768).to('cuda')
-        o = torch.zeros(1, 3, 6370).to('cuda')
+        if self.use_embedding:
+            o = torch.zeros(1, 3, dtype=torch.long).to('cuda')
+            n_answ = torch.zeros(1, 25, dtype=torch.long).to('cuda')
+        else:
+            o = torch.zeros(1, 3, 6370).to('cuda')
+            n_answ = torch.zeros(1, 25, 6370).to('cuda')
         n_feats = torch.zeros(1, 25, 768).to('cuda')
-        n_answ = torch.zeros(1, 25, 6370).to('cuda')
         n_auds = torch.zeros(1, 25, 768).to('cuda')
         pms.summary(self.model, v, n_feats, aud, n_auds, o, n_answ, show_input=True, print_summary=True)
         self._active_ds = copy.deepcopy(active_ds)
@@ -548,7 +494,7 @@ class VideoAudioFreqLearnMCVQA:
         dataset = IterableLookUp(active_db=self._active_ds,
                                  cached_db=self._cache_ds,
                                  model_emb=self.embedding_transformer,
-                                 answer_data_json=self.answer_data_json)
+                                 answer_data_json=self.answer_data_json, use_embedding=self.use_embedding)
 
         dataloader = DataLoader(dataset=dataset,
                                 batch_size=FIXED_BATCH_SIZE,
@@ -604,7 +550,7 @@ class VideoAudioFreqLearnMCVQA:
         save_checkpoint({
             'state_dict': self.model.state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, f'Val_to_Train_10e.pth')
+        }, f'Model_Trained.pth')
 
         # Freeze the video_model #
         self.model.eval()
@@ -620,7 +566,7 @@ class VideoAudioFreqLearnMCVQA:
         dataset = IterableLookUp(active_db=active_db,
                                  cached_db=self._cache_ds,
                                  model_emb=self.embedding_transformer,
-                                 answer_data_json=self.answer_data_json)
+                                 answer_data_json=self.answer_data_json, use_embedding=self.use_embedding)
 
         dataloader = DataLoader(dataset=dataset,
                                 batch_size=FIXED_BATCH_SIZE,
@@ -675,12 +621,11 @@ class VideoAudioFreqLearnMCVQA:
         return
 
     def answer_q(self,
-
                  frames,
                  question,
                  audio_frames=None,
                  option_frames=None,
-                 n_ids=None,
+                 n_ids=None, use_embedding=False,
                  **args):
         """
             Answer a multiple choice question.
@@ -711,12 +656,18 @@ class VideoAudioFreqLearnMCVQA:
         ### Fix incoming frames ###
         if not self.answer_data_json is None and option_frames is not None:
             o_ = torch.LongTensor([self.answer_data_json[f]['int_index'] for f in option_frames])
-            o_ = torch.nn.functional.one_hot(o_, num_classes=6370).unsqueeze(0)
-            o_ = o_.float()
+            if not self.use_embedding:
+                o_ = torch.nn.functional.one_hot(o_, num_classes=6370).unsqueeze(0)
+                o_ = o_.float()
+            else:
+                o_ = o_.unsqueeze(0)
             o_ = o_.to('cuda')
             ########
-            _no_frames = torch.nn.functional.one_hot(torch.LongTensor([no_frames]), num_classes=6370)
-            _no_frames = _no_frames.float()
+            if not self.use_embedding:
+                _no_frames = torch.nn.functional.one_hot(torch.LongTensor([no_frames]), num_classes=6370)
+                _no_frames = _no_frames.float()
+            else:
+                _no_frames = torch.LongTensor([no_frames])
             _no_frames = _no_frames.to('cuda')
             ### Fix incoming masks ###
             if n_ids is not None:
@@ -736,41 +687,7 @@ class VideoAudioFreqLearnMCVQA:
         answer = [stored_response['answer'][gg.argmax().item()]]
         return answer_id, answer
 
-
-def test_train_reordering(json_ds):
-    def bvadb2(dataset):
-        with open(ANSWER_DATA_PATH, 'r') as fin:
-            answer_data_json = json.load(fin)
-        question_db = {}
-        for entry in tqdm.tqdm(dataset):
-            for question in entry['mc_question']:
-                try:
-                    question_db[question['question']]
-                except KeyError:
-                    question_db[question['question']] = {'video_emb': [],
-                                                         'audio_emb': [],
-                                                         'answer': [],
-                                                         'answer_int': [],
-                                                         'options': []}
-                answer = answer_data_json[question['options'][question['answer_id']]]['int_index']
-                answer_int = int(question['answer_id'])
-                video_emb = entry['frames'].cpu()
-                audio_emb = entry['audio'].cpu()
-                options = [answer_data_json[f]['int_index'] for f in question['options']]
-                question_db[question['question']]['video_emb'].append(video_emb)
-                question_db[question['question']]['audio_emb'].append(audio_emb)
-                question_db[question['question']]['answer'].append(answer)
-                question_db[question['question']]['answer_int'].append(answer_int)
-                question_db[question['question']]['options'].append(options)
-
-        return question_db
-
-    active = bvadb2(json_ds)
-    dataset = DbAudLearnDataset(active_db=active,
-                                cached_db=None,
-                                model_emb=None)
-
-    dataloader = DataLoader(dataset=dataset, batch_size=1, shuffle=False, pin_memory=False,
-                            collate_fn=dataset.custom_collate_fn)
-    print('Stop Here')
-    return
+    def load_weights(self, path):
+        data = torch.load(path)
+        self.model.load_state_dict(data['state_dict'])
+        self.model.eval()

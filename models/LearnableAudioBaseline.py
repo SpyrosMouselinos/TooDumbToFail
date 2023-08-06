@@ -14,7 +14,6 @@ from torchmetrics.classification import MulticlassAccuracy
 from utils import ANSWER_DATA_PATH
 import pytorch_model_summary as pms
 
-
 def save_checkpoint(state, filename='checkpoint'):
     torch.save(state, filename + '.pth')
 
@@ -86,24 +85,24 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
         # Common Dropout #
         self.common_dropout = nn.Dropout1d(p=self.common_droput)
         # Common BLOCKS #
-        self.common_vision_base = nn.Identity()
+        self.common_vision_base = nn.Linear(self.v_dim, self.emb_dim)
         self.v_block = nn.Sequential(self.common_vision_base)
         self.v_block2 = nn.Sequential(self.common_vision_base, self.common_dropout)
 
-        self.common_audio_base = nn.Identity()
+        self.common_audio_base = nn.Linear(self.v_dim, self.emb_dim)
         self.a_block = nn.Sequential(self.common_audio_base)
         self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
 
         if not self.use_embedding:
-            self.common_option_base = nn.Identity()
+            self.common_option_base = nn.Linear(in_features=6370, out_features=self.emb_dim)
             self.o_block = nn.Sequential(self.common_option_base)
             self.o_block2 = nn.Sequential(self.common_option_base, self.common_dropout)
         else:
             self.embedding_library = nn.Embedding(num_embeddings=6370, embedding_dim=self.emb_dim)
         # Encoder Blocks#
-        #self.visual_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
-        #self.audio_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
-        self.join_block_encoder = NoBrainEncoderBlock()
+        self.visual_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
+        self.audio_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
+        #self.option_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=16, add_skip=False)
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
 
@@ -150,8 +149,10 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
             o = self.embedding_library(o)
             o2 = self.embedding_library(n_answ)
         #############################################
-        mix_informed_answer, overconfidence_penalty = self.join_block_encoder(v, v2, aud, aud2)
-        options_informed_answer = mix_informed_answer.unsqueeze(2) * o
+        visually_informed_answer = self.visual_encoder(v.unsqueeze(1), v2, o2)
+        audio_informed_answer = self.audio_encoder(aud.unsqueeze(1), aud2, o2)
+        mix_informed_answer = visually_informed_answer + audio_informed_answer
+        options_informed_answer = mix_informed_answer * o
         options_informed_answer = options_informed_answer.sum(1)
         #############################################
         score_0 = options_informed_answer * o[:, 0, :]
@@ -185,7 +186,7 @@ class NoBrainEncoderBlock(nn.Module):
         self.temp = nn.Parameter(data=-0.4054 * torch.ones(1, device='cuda'), requires_grad=True)
         self.topk = TopKGroup(skip_self=True, top_k=25)
 
-    def forward(self, q1, k1, q2, k2, mask=None, condition=None, **args):
+    def forward(self, q1, k1, q2, k2, mask=None, **args):
         a = torch.nn.functional.sigmoid(self.temp)
         q1 = torch.nn.functional.normalize(q1, p=2, dim=-1)
         k1 = torch.nn.functional.normalize(k1, p=2, dim=-1)

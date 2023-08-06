@@ -183,7 +183,6 @@ class NoBrainEncoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
         self.temp = nn.Parameter(data=-0.4054 * torch.ones(1, device='cuda'), requires_grad=True)
-        #self.topk = AdaptableTopKGroup(skip_self=True, max_n_choices=700)
         self.topk = TopKGroup(skip_self=True, top_k=25)
 
     def forward(self, q1, k1, q2, k2, mask=None, condition=None, **args):
@@ -204,8 +203,8 @@ class NoBrainEncoderBlock(nn.Module):
         attention1 = F.softmax(scores1, dim=-1)
         attention2 = F.softmax(scores2, dim=-1)
         attention = attention1 * a + (1 - a) * attention2
-        attention, overconfidence_penalty = self.topk(attention)
-        return attention, overconfidence_penalty
+        attention = self.topk(attention)
+        return attention
 
 
 class TopKGroup(nn.Module):
@@ -213,7 +212,6 @@ class TopKGroup(nn.Module):
         super().__init__()
         self.top_k = top_k
         self.skip_self = skip_self
-        # TODO: Change attribute if this is in training mode
 
     def forward(self, score_vector, **args):
         if not self.training:
@@ -235,7 +233,7 @@ class TopKGroup(nn.Module):
             mask[self_top] = 0
         mask = mask.unsqueeze(0)
         score_vector = score_vector * mask
-        return score_vector, None
+        return score_vector
 
 
 class AdaptableTopKGroup(nn.Module):

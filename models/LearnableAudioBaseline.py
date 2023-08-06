@@ -69,8 +69,10 @@ class EncoderBlockV1(nn.Module):
 
 
 class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
-    def __init__(self, v_dim=768, l_dim=384, o_dim=None, use_embedding=False, common_droput=0.0, use_aux_loss=0):
+    def __init__(self, v_dim=768, l_dim=384, o_dim=None, use_embedding=False, common_droput=0.0, use_aux_loss=0,
+                 overconfidence_loss=0.0):
         super().__init__()
+        self.overconfidence_loss = overconfidence_loss
         self.use_embedding = use_embedding
         self.v_dim = v_dim
         self.q_dim = l_dim
@@ -93,14 +95,14 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
         self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
 
         if not self.use_embedding:
-            self.common_option_base = nn.Linear(6370, 128)
+            self.common_option_base = nn.Identity()
             self.o_block = nn.Sequential(self.common_option_base)
             self.o_block2 = nn.Sequential(self.common_option_base, self.common_dropout)
         else:
-            self.embedding_library = nn.Embedding(num_embeddings=6370, embedding_dim=128)
+            self.embedding_library = nn.Embedding(num_embeddings=6370, embedding_dim=self.emb_dim)
         # Encoder Blocks#
-        # self.visual_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
-        # self.audio_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
+        #self.visual_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
+        #self.audio_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
         self.join_block_encoder = NoBrainEncoderBlock()
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
@@ -148,11 +150,8 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
             o = self.embedding_library(o)
             o2 = self.embedding_library(n_answ)
         #############################################
-        # visually_informed_answer = self.visual_encoder(v.unsqueeze(1), v2, o2)
-        # audio_informed_answer = self.audio_encoder(aud.unsqueeze(1), aud2, o2)
         mix_informed_answer, overconfidence_penalty = self.join_block_encoder(v, v2, aud, aud2)
-        # mix_informed_answer = visually_informed_answer + audio_informed_answer
-        options_informed_answer = mix_informed_answer.unsqueeze(2) * o2
+        options_informed_answer = mix_informed_answer.unsqueeze(2) * o
         options_informed_answer = options_informed_answer.sum(1)
         #############################################
         score_0 = options_informed_answer * o[:, 0, :]
@@ -176,8 +175,6 @@ class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
         if gt_answer_int is not None:
             loss = self.calc_loss(scores, gt_answer_int)
             metric = self.calc_acc(scores[:, :3], gt_answer_int)
-            if overconfidence_penalty is not None:
-                loss += torch.nn.functional.l1_loss(overconfidence_penalty, torch.zeros_like(overconfidence_penalty, device='cuda'))
             return scores, loss, metric
         return scores, None, None
 
@@ -186,9 +183,10 @@ class NoBrainEncoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
         self.temp = nn.Parameter(data=-0.4054 * torch.ones(1, device='cuda'), requires_grad=True)
-        self.topk = AdaptableTopKGroup(skip_self=True, top_k=1000)
+        #self.topk = AdaptableTopKGroup(skip_self=True, max_n_choices=700)
+        self.topk = TopKGroup(skip_self=True, top_k=25)
 
-    def forward(self, q1, k1, q2, k2, mask=None, **args):
+    def forward(self, q1, k1, q2, k2, mask=None, condition=None, **args):
         a = torch.nn.functional.sigmoid(self.temp)
         q1 = torch.nn.functional.normalize(q1, p=2, dim=-1)
         k1 = torch.nn.functional.normalize(k1, p=2, dim=-1)
@@ -237,7 +235,7 @@ class TopKGroup(nn.Module):
             mask[self_top] = 0
         mask = mask.unsqueeze(0)
         score_vector = score_vector * mask
-        return score_vector
+        return score_vector, None
 
 
 class AdaptableTopKGroup(nn.Module):
@@ -247,16 +245,20 @@ class AdaptableTopKGroup(nn.Module):
         self.skip_self = skip_self
         self.tau = tau
         self.max_n_choices = max_n_choices
-        self.initializer = torch.arange(start=max_n_choices, end=0, step=-1, device=device).unsqueeze(0)
-
-        self.top_k_suggestor = torch.nn.Parameter(data=self.initializer,
-                                                  requires_grad=True,
-                                                  )
+        self.top_k_suggestor = torch.nn.Sequential(
+            nn.Linear(6370, max_n_choices),
+            nn.ReLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(max_n_choices, max_n_choices),
+        )
 
     def __repr__(self):
-        return f"Adaptable Layer is inclined to choose {self.top_k_suggestor.argmax(-1)[0].cpu().item()} neighbours!"
+        try:
+            return f"Adaptable Layer is inclined to choose {self.top_k_suggestor.argmax(-1)[0].cpu().item()} neighbours!"
+        except:
+            return f"Can not determine the number of neighbours"
 
-    def forward(self, score_vector, **args):
+    def forward(self, score_vector, condition, **args):
         skip_self = self.skip_self and self.training
         # Old behaviour #
         _, top_k_indices = torch.topk(score_vector, k=score_vector.size()[-1], dim=-1)
@@ -267,15 +269,19 @@ class AdaptableTopKGroup(nn.Module):
         if skip_self:
             mask[self_top] = 0
         mask = mask.unsqueeze(0)
-        score_vector = score_vector * mask
-        # New behaviour #
-        suggestion_mask = self.top_k_suggestor
+        score_vector = score_vector * mask  # MASK SELF ONLY
+
+        # UNDO THIS #
         score_vector = score_vector[torch.arange(score_vector.size(0)).unsqueeze(1), top_k_indices]  # Ordered
+        suggestion_mask = self.top_k_suggestor(condition)
         hard_d = torch.nn.functional.gumbel_softmax(logits=suggestion_mask, tau=self.tau, hard=True, dim=-1)
-        LU_1 = torch.tril(input=torch.ones(size=(self.max_n_choices, self.max_n_choices), device=self.device),
-                          diagonal=0)
+        LU_1 = torch.tril(
+            input=torch.ones(size=(self.max_n_choices, self.max_n_choices), device=self.device),
+            diagonal=0)
         final_mask = torch.matmul(hard_d, LU_1)
         score_vector = score_vector * final_mask[:, :score_vector.size()[-1]]
+        # UNDO IT HERE #
+        score_vector = torch.zeros_like(score_vector).scatter_(1, top_k_indices.unsqueeze(0), score_vector)
         overconfidence_penalty = final_mask.sum(-1)
         return score_vector, overconfidence_penalty
 
@@ -411,12 +417,13 @@ class VideoAudioFreqLearnMCVQA:
     """Multiple-Choice vQA Model using Video and Audio Inputs, Frequency  and Q/A as embedding pairs"""
 
     def __init__(self, active_ds, cache_ds=None, model_emb='all-MiniLM-L12-v2', look_for_one_hot=True,
-                 use_embedding=False, common_droput=0.0, use_aux_loss=0):
+                 use_embedding=False, common_droput=0.0, use_aux_loss=0, overconfidence_loss=0):
         self.lfoh = look_for_one_hot
         self.use_embedding = use_embedding
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
         self.model = MultiRetrievalAugmentedEmbeddingV1(use_embedding=use_embedding, common_droput=common_droput,
-                                                        use_aux_loss=use_aux_loss)
+                                                        use_aux_loss=use_aux_loss,
+                                                        overconfidence_loss=overconfidence_loss)
         self.model.to(device='cuda')
         v = torch.zeros(1, 768).to('cuda')
         aud = torch.zeros(1, 768).to('cuda')

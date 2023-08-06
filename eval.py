@@ -35,24 +35,20 @@ valid_cfg = {'video_folder': './data/valid/',
              }
 val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
 # test_train_reordering(json_ds=train_mc_vqa_dataset)
-model = VideoAudioFreqLearnMCVQA(active_ds=train_mc_vqa_dataset, cache_ds=train_mc_vqa_dataset, use_embedding=True, use_aux_loss=0)
-print(model.model.join_block_encoder.topk)
+model = VideoAudioFreqLearnMCVQA(active_ds=train_mc_vqa_dataset,
+                                 cache_ds=train_mc_vqa_dataset,
+                                 use_embedding=False,
+                                 use_aux_loss=0,
+                                 overconfidence_loss=None)
+#print(model.model.join_block_encoder.topk)
+#model.eval(val_dataset=val_mc_vqa_dataset)
+#for i in range(40):
 #model.load_weights('./Model_Trained.pth.pth')
-model.fit(lr=0.0005, bs=32, epochs=20)
-model.eval(val_dataset=val_mc_vqa_dataset)
-print(model.model.join_block_encoder.topk)
-model.fit(lr=0.001, bs=64, epochs=30)
-model.eval(val_dataset=val_mc_vqa_dataset)
-print(model.model.join_block_encoder.topk)
-model.fit(lr=0.002, bs=128, epochs=50)
-model.eval(val_dataset=val_mc_vqa_dataset)
-print(model.model.join_block_encoder.topk)
-model.fit(lr=0.003, bs=256, epochs=100)
-model.eval(val_dataset=val_mc_vqa_dataset)
-print(model.model.join_block_encoder.topk)
-model.fit(lr=0.005, bs=512, epochs=150)
-model.eval(val_dataset=val_mc_vqa_dataset)
-print(model.model.join_block_encoder.topk)
+    # print("Training with 1 overconfidence loss, and without trainable embeddings")
+    # model.fit(lr=0.001, bs=128, epochs=5)
+    # model.eval(val_dataset=val_mc_vqa_dataset)
+    #print(model.model.join_block_encoder.topk)
+
 results = {}
 test_results = []
 test_results_dict = {k: v for k, v in zip(CAT, np.zeros((len(CAT))))}
@@ -79,8 +75,10 @@ for run in range(test_runs):
                                                    top_k=25,  # 0.6046@25/Pre 0.4
                                                    sample=False,
                                                    temp=1,
-                                                   use_gt_options=True, pre_softmax=True, post_softmax=False,
-                                                   approximate_gt_options=False, use_embedding=True)
+                                                   use_gt_options=True,
+                                                   pre_softmax=True,
+                                                   post_softmax=False,
+                                                   approximate_gt_options=False, use_embedding=False)
             answer_dict = {
                 'id': q['id'],
                 'answer_id': q_answer_id[0],

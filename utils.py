@@ -30,7 +30,14 @@ import numpy as np
 import requests
 from typing import Dict, Any
 import decord as de
+import nltk
+from nltk import pos_tag, word_tokenize
+from nltk.corpus import wordnet
+from tqdm import tqdm
 
+nltk.download("punkt")
+nltk.download("averaged_perceptron_tagger")
+nltk.download("wordnet")
 ctx = de.cpu(0)
 
 # from data import PerceptionDataset
@@ -90,7 +97,7 @@ CAT = AREA + REASONING + TAG
 DATA_PATH = data_path = './data/'
 TRAIN_DATA_PATH = train_data_path = DATA_PATH + 'train/'
 VALID_DATA_PATH = valid_data_path = DATA_PATH + 'valid/'
-ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keys.json'
+ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keysword_overlap.json'
 
 
 def download_and_unzip(url: str, destination: str):
@@ -298,6 +305,7 @@ def get_audio_frames(data_item: Dict[str, Any],
     indices = list(range(0, t))
     return ar.get_batch(indices=indices).asnumpy()
 
+
 def test_video(valid_db_dict, video_id='video_8241'):
     video_path = 'data/sample/videos/'
     video_item = valid_db_dict[video_id]
@@ -472,21 +480,91 @@ def test_download_samples():
     # download_and_unzip(valid_videos_url, data_path)
 
 
-# gather_answers(['./data/mc_question_train.json', './data/mc_question_valid.json'])
+def get_nouns_and_verbs(text):
+    tokens = word_tokenize(text)
+    tagged_tokens = pos_tag(tokens)
+
+    nouns = []
+    verbs = []
+
+    for token, tag in tagged_tokens:
+        if tag.startswith("NN"):  # Noun
+            nouns.append(token)
+        elif tag.startswith("VB"):  # Verb
+            verbs.append(token)
+
+    return nouns + verbs
 
 
-# x = get_audio_frames(None, './data/sample/videos/', override_video_name=True)
-#
-# from transformers import AutoFeatureExtractor, HubertModel
-# import torch
-#
-# feature_extractor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
-# video_model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
-#
-# # audio file is decoded on the fly
-# inputs = feature_extractor(x[0][0], sampling_rate=16000, return_tensors="pt")
-#
-# with torch.no_grad():
-#     logits = video_model(**inputs)['last_hidden_state'].mean(1)
-#
-# print(logits.size())
+def word_overlap(str1, str2):
+    words1 = set(get_nouns_and_verbs(str1))
+    words2 = set(get_nouns_and_verbs(str2))
+    # words1 = set(str1.split())
+    # words2 = set(str2.split())
+    return len(words1 & words2)  # Returns the count of common words
+
+
+def find_largest_overlap(y, x):
+    max_overlap = -1
+    max_overlap_item = None
+
+    for item in y:
+        overlap = word_overlap(item, x)
+        if overlap > max_overlap:
+            max_overlap = overlap
+            max_overlap_item = item
+        elif overlap == max_overlap:
+            if len(item.split()) < len(max_overlap_item.split()):
+                max_overlap = overlap
+                max_overlap_item = item
+
+    return max_overlap_item
+
+
+def find_closest_index(json_file, option_frames, method='word_overlap2'):
+    """
+    Finds the closest OOD option entry based on a chosen method
+    Args:
+        json_file: The json file with the option listing
+        option_frames: The OOD options
+        method: Method to choose [Word_overlap, character_overlap, soft_cosine]
+
+    Returns: The respective embedding
+
+    """
+
+    ood_entries = []
+    closest_entries = []
+    for f in tqdm(option_frames):
+        if f not in json_file:
+        ### Retrieval Starts Here ###
+            if method == 'word_overlap2':
+                maybe_entry = find_largest_overlap(json_file, f)
+                ### Retrieval Ends Here ###
+                ood_entries.append(f)
+                closest_entries.append(maybe_entry)
+    return {a:b for a,b in zip(ood_entries, closest_entries)}
+
+
+def generate_answer_keys_for_test(train_val_answer_keys, test_questions, method='word_overlap2'):
+    org_name = train_val_answer_keys.split('.json')[0]
+    with open(train_val_answer_keys, 'r') as fin:
+        train_val_data = json.load(fin)
+
+    with open(test_questions, 'r') as fin:
+        test_questions_data = json.load(fin)
+
+    o_list = []
+    for k, v in test_questions_data.items():
+        for i in v['mc_question']:
+            for j in i['options']:
+                o_list.append(j)
+    o_list = list(set(o_list))
+    pair_dict = find_closest_index(train_val_data, o_list)
+    new_dict = train_val_data
+    for k,v in pair_dict.items():
+        new_dict.update({k: new_dict[v]})
+    with open(org_name + method + '.json', 'w') as fout:
+        json.dump(new_dict, fout)
+
+#generate_answer_keys_for_test('./data/answer_keys.json', './data/mc_question_test.json')

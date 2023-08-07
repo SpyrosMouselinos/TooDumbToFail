@@ -68,7 +68,12 @@ class EncoderBlockV1(nn.Module):
 
 
 class MultiRetrievalAugmentedEmbeddingV1(nn.Module):
-    def __init__(self, v_dim=768, l_dim=384, o_dim=None, use_embedding=False, common_droput=0.0, use_aux_loss=0,
+    def __init__(self, v_dim=768,
+                 l_dim=384,
+                 o_dim=None,
+                 use_embedding=False,
+                 common_droput=0.0,
+                 use_aux_loss=0,
                  overconfidence_loss=0.0):
         super().__init__()
         self.overconfidence_loss = overconfidence_loss

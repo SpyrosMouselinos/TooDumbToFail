@@ -16,11 +16,11 @@ from transformers import AutoFeatureExtractor, HubertModel
 # Constants
 
 EXTRACTED_MODALITY = 'Audio'
-SPLIT = split = 'valid'
+SPLIT = split = 'test'
 train_db_path = f'data/mc_question_{SPLIT}.json'
 pt_db_dict = load_db_json(train_db_path)
 
-video_folder = f'./data/{SPLIT}/' if SPLIT == 'valid' else f'./data/{SPLIT}/videos'
+video_folder = f'./data/{SPLIT}/' if SPLIT != 'train' else f'./data/{SPLIT}/videos'
 task = 'mc_question'
 N_SEGMENTS = 1
 MINI_BATCH_SIZE = 16

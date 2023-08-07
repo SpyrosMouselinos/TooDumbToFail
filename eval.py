@@ -34,20 +34,14 @@ valid_cfg = {'video_folder': './data/valid/',
              'use_audio': True,
              }
 val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
-# test_train_reordering(json_ds=train_mc_vqa_dataset)
-model = VideoAudioFreqLearnMCVQA(active_ds=train_mc_vqa_dataset,
+model = VideoAudioFreqLearnMCVQA(active_ds=val_mc_vqa_dataset,
                                  cache_ds=train_mc_vqa_dataset,
-                                 use_embedding=False,
+                                 use_embedding=True,
                                  use_aux_loss=0,
                                  overconfidence_loss=None)
-#print(model.model.join_block_encoder.topk)
-#model.eval(val_dataset=val_mc_vqa_dataset)
-#for i in range(40):
-#model.load_weights('./Model_Trained.pth.pth')
-    # print("Training with 1 overconfidence loss, and without trainable embeddings")
-    # model.fit(lr=0.001, bs=128, epochs=5)
-    # model.eval(val_dataset=val_mc_vqa_dataset)
-    #print(model.model.join_block_encoder.topk)
+for i in range(7):
+    model.fit(lr=0.001, bs=256, epochs=5)
+    model.eval(val_dataset=train_mc_vqa_dataset)
 
 results = {}
 test_results = []

@@ -39,7 +39,7 @@ model = VideoAudioFreqLearnMCVQA(active_ds=val_mc_vqa_dataset,
                                  use_embedding=True,
                                  use_aux_loss=0,
                                  overconfidence_loss=None, model_version=2)
-for i in range(7):
+for i in range(100):
     model.fit(lr=0.001, bs=256, epochs=5)
     model.eval(val_dataset=train_mc_vqa_dataset)
 

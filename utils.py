@@ -97,7 +97,7 @@ CAT = AREA + REASONING + TAG
 DATA_PATH = data_path = './data/'
 TRAIN_DATA_PATH = train_data_path = DATA_PATH + 'train/'
 VALID_DATA_PATH = valid_data_path = DATA_PATH + 'valid/'
-ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keysword_overlap.json'
+ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keysword_overlap2.json'
 
 
 def download_and_unzip(url: str, destination: str):

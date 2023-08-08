@@ -43,44 +43,43 @@ test_cfg = {'video_folder': './data/test/',
             }
 
 test_mc_vqa_dataset = PerceptionDataset(test_db_dict, **test_cfg)
-model = VideoAudioFreqLearnMCVQA(active_ds=train_mc_vqa_dataset,
-                                 cache_ds=val_mc_vqa_dataset,
+model = VideoAudioFreqLearnMCVQA(active_ds=val_mc_vqa_dataset,
+                                 cache_ds=train_mc_vqa_dataset.union(val_mc_vqa_dataset),
                                  use_embedding=True,
                                  use_aux_loss=0,
-                                 overconfidence_loss=None)
+                                 overconfidence_loss=None, model_version=1)
 
 model.load_weights('Model_Trained.pth.pth')
 model.model.eval()
-model.eval()
-# answers = {}
-# for video_item in tqdm.tqdm(test_mc_vqa_dataset):
-#     # for video_item in val_mc_vqa_dataset:
-#     video_id = video_item['metadata']['video_id']
-#     video_answers = []
-#
-#     for q_idx, q in enumerate(video_item['mc_question']):
-#         # video_model inference
-#         q_answer_id, q_answer = model.answer_q(
-#             frames=video_item['frames'],
-#             question=q,
-#             audio_frames=video_item['audio'],
-#             option_frames=q['options'],
-#             shots=-1,
-#             top_k=25,  # 0.6046@25/Pre 0.4
-#             sample=False,
-#             temp=1,
-#             use_gt_options=True,
-#             pre_softmax=True,
-#             post_softmax=False,
-#             approximate_gt_options=False, use_embedding=False)
-#         answer_dict = {
-#             'id': q['id'],
-#             'answer_id': q_answer_id[0],
-#             'answer': q['options'][q_answer_id[0]]
-#         }
-#         video_answers.append(answer_dict)
-#
-#     answers[video_id] = video_answers
-#
-# with open('test_results_full.json', 'w') as my_file:
-#     json.dump(answers, my_file)
+answers = {}
+for video_item in tqdm.tqdm(test_mc_vqa_dataset):
+    # for video_item in val_mc_vqa_dataset:
+    video_id = video_item['metadata']['video_id']
+    video_answers = []
+
+    for q_idx, q in enumerate(video_item['mc_question']):
+        # video_model inference
+        q_answer_id, q_answer = model.answer_q(
+            frames=video_item['frames'],
+            question=q,
+            audio_frames=video_item['audio'],
+            option_frames=q['options'],
+            shots=-1,
+            top_k=25,  # 0.6046@25/Pre 0.4
+            sample=False,
+            temp=1,
+            use_gt_options=True,
+            pre_softmax=True,
+            post_softmax=False,
+            approximate_gt_options=False, use_embedding=False)
+        answer_dict = {
+            'id': q['id'],
+            'answer_id': q_answer_id[0],
+            'answer': q['options'][q_answer_id[0]]
+        }
+        video_answers.append(answer_dict)
+
+    answers[video_id] = video_answers
+
+with open('test_results_trainPlusval_VerbsNouns.json', 'w') as my_file:
+    json.dump(answers, my_file)

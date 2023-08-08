@@ -20,28 +20,18 @@
 # """
 import json
 import os
-import random
 import zipfile
-
-import av
-import cv2
 import moviepy.editor as mvp
-import numpy as np
+import numpy.ma
 import requests
 from typing import Dict, Any
 import decord as de
-import nltk
 from nltk import pos_tag, word_tokenize
-from nltk.corpus import wordnet
 from tqdm import tqdm
+import numpy as np
+from matplotlib import pyplot as plt
 
-nltk.download("punkt")
-nltk.download("averaged_perceptron_tagger")
-nltk.download("wordnet")
 ctx = de.cpu(0)
-
-# from data import PerceptionDataset
-from models.FreqBaseline import FreqMCVQABaseline
 
 AREA = ['physics', 'semantics', 'abstraction', 'memory']
 REASONING = ['descriptive', 'counterfactual', 'explanatory', 'predictive']
@@ -97,7 +87,7 @@ CAT = AREA + REASONING + TAG
 DATA_PATH = data_path = './data/'
 TRAIN_DATA_PATH = train_data_path = DATA_PATH + 'train/'
 VALID_DATA_PATH = valid_data_path = DATA_PATH + 'valid/'
-ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keysword_overlap2.json'
+ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keys.json'
 
 
 def download_and_unzip(url: str, destination: str):
@@ -241,9 +231,16 @@ def load_mp4_to_audioframes(filename: str, indices=None) -> np.array:
     return frames
 
 
+def load_mp4_to_ocr_frames(filename: str, indices=None, resize_to=None) -> np.array:
+    return load_mp4_to_frames(filename=filename, indices=indices, resize_to=resize_to)
+
+
 def get_video_frames(data_item: Dict[str, Any],
                      video_folder_path: str,
-                     override_video_name: bool = False, resize_to=None, num_samples=16, n_segments=1) -> np.array:
+                     override_video_name: bool = False,
+                     resize_to=None,
+                     num_samples=16,
+                     n_segments=1) -> np.array:
     """Loads frames of a video specified by an item dictionary.
 
     Assumes format of annotations used in the Perception Test Dataset.
@@ -259,7 +256,7 @@ def get_video_frames(data_item: Dict[str, Any],
 
     if override_video_name:
         video_file = os.path.join(video_folder_path,
-                                  'video_1580') + '.mp4'
+                                  'video_9253') + '.mp4'
     else:
         video_file = os.path.join(video_folder_path,
                                   data_item['metadata']['video_id']) + '.mp4'
@@ -292,7 +289,7 @@ def get_audio_frames(data_item: Dict[str, Any],
 
     if override_video_name:
         video_file = os.path.join(video_folder_path,
-                                  'video_1580') + '.mp4'
+                                  'video_8241') + '.mp4'
     else:
         video_file = os.path.join(video_folder_path,
                                   data_item['metadata']['video_id']) + '.mp4'
@@ -306,7 +303,18 @@ def get_audio_frames(data_item: Dict[str, Any],
     return ar.get_batch(indices=indices).asnumpy()
 
 
-def test_video(valid_db_dict, video_id='video_8241'):
+def get_ocr_frames(data_item: Dict[str, Any],
+                   video_folder_path: str,
+                   override_video_name: bool = False,
+                   resize_to=None,
+                   num_samples=16,
+                   n_segments=1) -> np.array:
+    return get_video_frames(data_item=data_item, video_folder_path=video_folder_path,
+                            override_video_name=override_video_name, resize_to=resize_to, num_samples=num_samples,
+                            n_segments=n_segments)
+
+
+def atest_video(valid_db_dict, video_id='video_8241'):
     video_path = 'data/sample/videos/'
     video_item = valid_db_dict[video_id]
     video_path = os.path.join(video_path,
@@ -454,7 +462,7 @@ def analyse_test_results(results, category='8'):
         print(f'{example_tag}: {shot_results[example_tag] * 100:.2f}%')
 
 
-def test_download_samples():
+def atest_download_samples():
     sample_annot_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_annotations.zip'
     download_and_unzip(sample_annot_url, data_path)
     sample_videos_url = 'https://storage.googleapis.com/dm-perception-test/zip_data/sample_videos.zip'
@@ -537,13 +545,13 @@ def find_closest_index(json_file, option_frames, method='word_overlap2'):
     closest_entries = []
     for f in tqdm(option_frames):
         if f not in json_file:
-        ### Retrieval Starts Here ###
+            ### Retrieval Starts Here ###
             if method == 'word_overlap2':
                 maybe_entry = find_largest_overlap(json_file, f)
                 ### Retrieval Ends Here ###
                 ood_entries.append(f)
                 closest_entries.append(maybe_entry)
-    return {a:b for a,b in zip(ood_entries, closest_entries)}
+    return {a: b for a, b in zip(ood_entries, closest_entries)}
 
 
 def generate_answer_keys_for_test(train_val_answer_keys, test_questions, method='word_overlap2'):
@@ -562,9 +570,7 @@ def generate_answer_keys_for_test(train_val_answer_keys, test_questions, method=
     o_list = list(set(o_list))
     pair_dict = find_closest_index(train_val_data, o_list)
     new_dict = train_val_data
-    for k,v in pair_dict.items():
+    for k, v in pair_dict.items():
         new_dict.update({k: new_dict[v]})
     with open(org_name + method + '.json', 'w') as fout:
         json.dump(new_dict, fout)
-
-#generate_answer_keys_for_test('./data/answer_keys.json', './data/mc_question_test.json')

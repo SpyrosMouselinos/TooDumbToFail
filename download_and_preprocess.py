@@ -1,22 +1,18 @@
 import os
 import pickle
 import time
-
 import torch
 import tqdm
-from data import PerceptionDataset
-from utils import load_db_json, get_video_frames, get_audio_frames
-from utils import test_download_samples
+from utils import load_db_json, get_video_frames, get_audio_frames, get_ocr_frames
 import torch.nn as nn
 from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
 from transformers import AutoFeatureExtractor, HubertModel
-# Download annotations + train_videos
-# test_download_samples()
+
 
 # Constants
 
-EXTRACTED_MODALITY = 'Audio'
-SPLIT = split = 'test'
+EXTRACTED_MODALITY = 'Ocr'
+SPLIT = split = 'train'
 train_db_path = f'data/mc_question_{SPLIT}.json'
 pt_db_dict = load_db_json(train_db_path)
 
@@ -44,6 +40,10 @@ if EXTRACTED_MODALITY == 'Video':
     model.classifier = nn.Identity()
     model = model.to('cuda').half()
 elif EXTRACTED_MODALITY == 'Audio':
+    processor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+    model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
+    model = model.to('cuda')
+elif EXTRACTED_MODALITY == 'Ocr':
     processor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
     model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
     model = model.to('cuda')
@@ -84,6 +84,42 @@ def get_video_frames_wrapper(data_items):
     vid_frames = final_logits.mean(1)
     return vid_frames
 
+def get_ocr_frames_wrapper(data_items):
+    loaded_ocrs = []
+    for i in range(STORE_BATCH_SIZE):
+        vid_frames = get_ocr_frames(data_items[i],
+                                    video_folder,
+                                    override_video_name=False,
+                                    resize_to=224,
+                                    num_samples=16,
+                                    n_segments=N_SEGMENTS)
+        for s in range(N_SEGMENTS):
+            for f in vid_frames[s]:
+                loaded_ocrs.append(f)
+
+    inputs = processor(loaded_ocrs, return_tensors="pt")
+    inputs['pixel_values'] = inputs['pixel_values'].resize(STORE_BATCH_SIZE * N_SEGMENTS, 16,
+                                                           inputs['pixel_values'].size()[2],
+                                                           inputs['pixel_values'].size()[3],
+                                                           inputs['pixel_values'].size()[4])
+    final_logits = []
+    if N_SEGMENTS >= MINI_BATCH_SIZE:
+        for i in range(N_SEGMENTS // MINI_BATCH_SIZE):
+            semi_input = inputs['pixel_values'][i * MINI_BATCH_SIZE: (i + 1) * MINI_BATCH_SIZE].to('cuda')
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                with torch.no_grad():
+                    outputs = model(pixel_values=semi_input)
+                    final_logits = outputs.logits
+                    final_logits = final_logits.reshape(STORE_BATCH_SIZE, N_SEGMENTS, -1)
+    else:
+        semi_input = inputs['pixel_values'].to('cuda')
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+            with torch.no_grad():
+                outputs = model(pixel_values=semi_input)
+                final_logits = outputs.logits
+                final_logits = final_logits.reshape(STORE_BATCH_SIZE, N_SEGMENTS, -1)
+    vid_frames = final_logits.mean(1)
+    return vid_frames
 
 def maybe_get_video_frames(data_items, n_segments=1):
     for i in range(len(data_items)):
@@ -118,13 +154,11 @@ def get_audio_frames_wrapper(data_items):
     if N_SEGMENTS >= MINI_BATCH_SIZE:
         for i in range(N_SEGMENTS // MINI_BATCH_SIZE):
             semi_input = inputs['input_values'][i * MINI_BATCH_SIZE: (i + 1) * MINI_BATCH_SIZE].to('cuda')
-            #with torch.cuda.amp.autocast(dtype=torch.float16):
             with torch.no_grad():
                 outputs = model(input_values=semi_input)
                 final_logits = outputs['last_hidden_state'].mean(1)
     else:
         semi_input = inputs['input_values'].to('cuda')
-        #with torch.cuda.amp.autocast(dtype=torch.float16):
         with torch.no_grad():
             outputs = model(input_values=semi_input)
             final_logits = outputs['last_hidden_state'].mean(1)

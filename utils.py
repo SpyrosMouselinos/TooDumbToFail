@@ -1,35 +1,13 @@
-# """
-###
-# @title Serialize Example Results File
-# Writing video_model outputs in the expected competition format. This
-# JSON file contains answers to all questions in the validation split in the
-# format:
-#
-# example_output = {
-# 	'video_1009' :{
-# 		'mc_question':[
-# 			{'id': 0, 'answer_id': 2, 'answer': 'static or shaking'}
-# 		]
-# 	}
-# }
-#
-# This file could be used directly as a submission for the Eval.ai challenge
-
-# with open('results.json', 'w') as my_file:
-#     json.dump(answers, my_file)
-# """
 import json
 import os
 import zipfile
 import moviepy.editor as mvp
-import numpy.ma
 import requests
 from typing import Dict, Any
 import decord as de
 from nltk import pos_tag, word_tokenize
 from tqdm import tqdm
 import numpy as np
-from matplotlib import pyplot as plt
 
 ctx = de.cpu(0)
 
@@ -87,8 +65,8 @@ CAT = AREA + REASONING + TAG
 DATA_PATH = data_path = './data/'
 TRAIN_DATA_PATH = train_data_path = DATA_PATH + 'train/'
 VALID_DATA_PATH = valid_data_path = DATA_PATH + 'valid/'
-ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keys.json'
-
+ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keys.json' # Use gather answers to make this
+OCR_RELEVANT_VIDEO_IDS_PATH = ocr_relevant_video_ids_path = DATA_PATH + 'ocr_rel_videos.json' # Use gather ocr videos to make this
 
 def download_and_unzip(url: str, destination: str):
     """Downloads and unzips a .zip file to a destination.
@@ -168,6 +146,9 @@ def load_db_json(db_file: str) -> Dict[str, Any]:
 
 
 def gather_answers(db_files):
+    """
+    Generates ANSWER_DATA_PATH
+    """
     if isinstance(db_files, str):
         db_files = [db_files]
     else:
@@ -185,16 +166,38 @@ def gather_answers(db_files):
     global_list.sort()
 
     MAX_ITEMS = len(global_list)
-    print(MAX_ITEMS)
-    # new_dict = {}
-    # for index, item in enumerate(global_list):
-    #     one_hot = [0] * MAX_ITEMS
-    #     one_hot[index] = 1
-    #     new_dict.update({item: {'int_index': index, 'one_hot_index': one_hot}})
-    #
-    # with open(ANSWER_DATA_PATH, 'w') as fout:
-    #     json.dump(new_dict, fout)
+    new_dict = {}
+    for index, item in enumerate(global_list):
+        one_hot = [0] * MAX_ITEMS
+        one_hot[index] = 1
+        new_dict.update({item: {'int_index': index, 'one_hot_index': one_hot}})
+
+    with open(ANSWER_DATA_PATH, 'w') as fout:
+        json.dump(new_dict, fout)
     return
+
+def gather_ocr_videos(db_files):
+    """
+    Generates OCR_RELEVANT_VIDEO_IDS_PATH
+    """
+    if isinstance(db_files, str):
+        db_files = [db_files]
+    else:
+        pass
+    marked_for_ocr = {}
+    for db in db_files:
+        dict = load_db_json(db)
+        for q, i in dict.items():
+            for qas in i['mc_question']:
+                if 'letter' in qas['question'] or 'letters' in qas['question']:
+                    if q not in marked_for_ocr:
+                        marked_for_ocr.update({q: [qas['question']]})
+                    else:
+                        marked_for_ocr[q].append(qas['question'])
+    with open(OCR_RELEVANT_VIDEO_IDS_PATH, 'w') as fout:
+        json.dump(marked_for_ocr, fout)
+    return marked_for_ocr
+
 
 
 def load_mp4_to_frames(filename: str, indices=None, resize_to=None) -> np.array:
@@ -256,7 +259,7 @@ def get_video_frames(data_item: Dict[str, Any],
 
     if override_video_name:
         video_file = os.path.join(video_folder_path,
-                                  'video_9253') + '.mp4'
+                                  'video_874') + '.mp4'
     else:
         video_file = os.path.join(video_folder_path,
                                   data_item['metadata']['video_id']) + '.mp4'
@@ -309,6 +312,7 @@ def get_ocr_frames(data_item: Dict[str, Any],
                    resize_to=None,
                    num_samples=16,
                    n_segments=1) -> np.array:
+
     return get_video_frames(data_item=data_item, video_folder_path=video_folder_path,
                             override_video_name=override_video_name, resize_to=resize_to, num_samples=num_samples,
                             n_segments=n_segments)
@@ -574,3 +578,5 @@ def generate_answer_keys_for_test(train_val_answer_keys, test_questions, method=
         new_dict.update({k: new_dict[v]})
     with open(org_name + method + '.json', 'w') as fout:
         json.dump(new_dict, fout)
+
+

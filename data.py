@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import pickle
 from typing import List, Dict, Any
@@ -6,10 +7,12 @@ import torch
 import torch.nn as nn
 import tqdm
 
-from utils import load_db_json, get_video_frames, get_audio_frames
-from transformers import AutoImageProcessor, TimesformerForVideoClassification, VideoMAEForVideoClassification, \
+from utils import load_db_json, get_video_frames, get_audio_frames, get_ocr_frames, OCR_RELEVANT_VIDEO_IDS_PATH, \
+    gather_ocr_videos
+from transformers import VideoMAEForVideoClassification, \
     VideoMAEImageProcessor, AutoFeatureExtractor, HubertModel
-import numpy as np
+from models.OCR_model import OCRmodel
+
 
 
 class PerceptionDataset:
@@ -23,8 +26,14 @@ class PerceptionDataset:
         split and task availability.
     """
 
-    def __init__(self, pt_db_dict: Dict[str, Any], video_folder: str,
-                 task: str, split: str, js_only: bool, use_audio: bool = False, auto_unload: bool = True) -> None:
+    def __init__(self, pt_db_dict: Dict[str, Any],
+                 video_folder: str,
+                 task: str,
+                 split: str,
+                 js_only: bool,
+                 use_audio: bool = False,
+                 use_ocr: bool = False,
+                 auto_unload: bool = True) -> None:
         """Initializes the PerceptionDataset class.
 
         Args:
@@ -34,6 +43,7 @@ class PerceptionDataset:
           split (str): Dataset split to load.
           js_only (bool): Whether we load the full dataset or only the json-related description
           use_audio (bool): Whether we load the audio of each video segment
+          use_ocr (bool): Whether we load the ocr module and apply it on every image (frames got by video segmentation default:16)
           auto_unload (bool): Whether we unload the video/audio encoder after every use (saves space, makes everything super slow)
         """
         self.js_only = js_only
@@ -43,8 +53,21 @@ class PerceptionDataset:
         self.pt_db_list = self.load_dataset(pt_db_dict)
         self.video_load_flag = False
         self.audio_load_flag = False
+        self.ocr_load_flag = False
         self.use_audio = use_audio
+        self.use_ocr = use_ocr
         self.auto_unload = auto_unload
+        """
+        Add conditional check to skip this if the video at hand is irrelevant to OCR
+        """
+        if os.path.exists(OCR_RELEVANT_VIDEO_IDS_PATH):
+            with open(OCR_RELEVANT_VIDEO_IDS_PATH, 'r') as fin:
+                self.ocr_relevance = json.load(fin)
+        else:
+            gather_ocr_videos(
+                ['./data/mc_question_train.json', './data/mc_question_valid.json', './data/mc_question_test.json'])
+            with open(OCR_RELEVANT_VIDEO_IDS_PATH, 'r') as fin:
+                self.ocr_relevance = json.load(fin)
 
     def __unload_on_demand__(self, modality):
         if modality == 'video':
@@ -57,8 +80,13 @@ class PerceptionDataset:
             self.audio_model = None
             torch.cuda.empty_cache()
             self.audio_load_flag = False
+        elif modality == 'ocr':
+            self.ocr_processor = None
+            self.ocr_model = None
+            torch.cuda.empty_cache()
+            self.ocr_load_flag = False
         else:
-            raise ValueError(f'Argument modality should be video/audio... you gave {modality}\n')
+            raise ValueError(f'Argument modality should be video/audio/ocr... you gave {modality}\n')
 
     def __load_on_demand__(self, modality):
         if modality == 'video':
@@ -73,6 +101,11 @@ class PerceptionDataset:
             self.audio_model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
             self.audio_model = self.audio_model.to('cuda')
             self.audio_load_flag = True
+        elif modality == 'ocr':
+            self.ocr_processor = lambda x: x
+            self.ocr_model = OCRmodel(use_angle_cls=True, det_db_thresh=0.1, label_list=['0'], dual_pass=True,
+                                      crop_scale=1.5)
+            self.ocr_load_flag = True
         else:
             raise ValueError(f'Argument modality should be video/audio... you gave {modality}\n')
 
@@ -175,6 +208,24 @@ class PerceptionDataset:
             self.__unload_on_demand__('audio')
         return aud_frames
 
+    def _get_ocr_frames(self, data_item):
+        if not self.ocr_load_flag:
+            self.__load_on_demand__('ocr')
+        N_SEGMENTS = 1
+        if data_item['metadata']['video_id'] in self.ocr_relevance:
+            vid_frames = get_ocr_frames(data_item, self.video_folder, override_video_name=False, resize_to=300,
+                                        num_samples=16, n_segments=N_SEGMENTS)[0]
+            ocr_frames = []
+            inputs = self.ocr_processor(vid_frames)
+            identified_strings = self.ocr_model(inputs)
+            for f in identified_strings:
+                ocr_frames.append(f)
+        else:
+            ocr_frames = []
+        # if self.auto_unload:
+        #     self.__unload_on_demand__('ocr') No need to unload OCR module (It is superlightweight)
+        return ocr_frames
+
     def _maybe_get_video_frames(self, data_item, n_segments=1):
         if isinstance(self.video_folder, str):
             video_file_pickle = os.path.join(self.video_folder,
@@ -237,6 +288,37 @@ class PerceptionDataset:
                     pass
         return aud_frames
 
+    def _maybe_get_ocr_frames(self, data_item, n_segments=1):
+        if isinstance(self.video_folder, str):
+            video_file_pickle = os.path.join(self.video_folder,
+                                             data_item['metadata']['video_id']) + f'_ocrseg_{n_segments}.pkl'
+            if os.path.exists(video_file_pickle):
+                # Unpickle and return
+                with open(video_file_pickle, 'rb') as fin:
+                    ocr_frames = pickle.load(fin)['ocr']
+            else:
+                # Get video frame and store
+                ocr_frames = self._get_ocr_frames(data_item=data_item)
+                with open(video_file_pickle, 'wb') as fout:
+                    pickle.dump({'ocr': ocr_frames}, fout)
+        elif isinstance(self.video_folder, tuple):
+            for vf in self.video_folder:
+                try:
+                    video_file_pickle = os.path.join(vf,
+                                                     data_item['metadata']['video_id']) + f'_ocrseg_{n_segments}.pkl'
+                    if os.path.exists(video_file_pickle):
+                        # Unpickle and return
+                        with open(video_file_pickle, 'rb') as fin:
+                            ocr_frames = pickle.load(fin)['ocr']
+                    else:
+                        # Get video frame and store
+                        ocr_frames = self._get_ocr_frames(data_item=data_item)
+                        with open(video_file_pickle, 'wb') as fout:
+                            pickle.dump({'ocr': ocr_frames}, fout)
+                except:
+                    pass
+        return ocr_frames
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Returns the video and annotations for a given index.
 
@@ -269,16 +351,26 @@ class PerceptionDataset:
                 aud_frames = torch.rand(size=(1, 768))
             else:
                 aud_frames = None
+            if self.use_ocr:
+                ocr_frames = []
+            else:
+                ocr_frames = None
         else:
             vid_frames = self._maybe_get_video_frames(data_item=data_item, n_segments=1)
             if self.use_audio:
                 aud_frames = self._maybe_get_audio_frames(data_item=data_item, n_segments=1)
             else:
                 aud_frames = None
+            if self.use_ocr:
+                ocr_frames = self._maybe_get_ocr_frames(data_item=data_item, n_segments=1)
+            else:
+                ocr_frames = None
+
         return {'metadata': metadata,
                 self.task: annot,
                 'frames': vid_frames,
-                'audio': aud_frames
+                'audio': aud_frames,
+                'ocr': ocr_frames
                 }
 
     def union(self, otherDataset):
@@ -287,7 +379,9 @@ class PerceptionDataset:
         assert self.task == otherDataset.task
         assert self.video_load_flag == otherDataset.video_load_flag
         assert self.audio_load_flag == otherDataset.audio_load_flag
+        assert self.ocr_load_flag == otherDataset.ocr_load_flag
         assert self.use_audio == otherDataset.use_audio
+        assert self.use_ocr == otherDataset.use_ocr
         assert self.auto_unload == otherDataset.auto_unload
 
         # If everything is ok you need to merge the pt_db_list and update the length of the new dataset
@@ -373,7 +467,7 @@ def atest_dataset_union():
 
     train_mc_vqa_dataset.union(val_mc_vqa_dataset)
     for i, item in enumerate(train_mc_vqa_dataset):
-        if i < original_length -1:
+        if i < original_length - 1:
             pass
         else:
             print(item)
@@ -387,8 +481,26 @@ def atest_dataset_union():
     print("End")
 
 
+def atest_dataset_with_video_and_audio_and_ocr():
+    cfg = {'video_folder': './data/test/',
+           'task': 'mc_question',
+           'split': 'test',
+           'js_only': False,
+           'use_audio': True,
+           'use_ocr': True,
+           }
+
+    train_db_path = 'data/mc_question_test.json'
+    train_db_dict = load_db_json(train_db_path)
+    dataset = PerceptionDataset(train_db_dict, **cfg)
+    for item in tqdm.tqdm(dataset):
+        pass
+    print("End")
+
+
 if __name__ == '__main__':
     # test_dataset_with_json_only()
     # test_dataset_with_video_and_audio()
-    atest_dataset_union()
+    # atest_dataset_union()
     # test_dataset_addition()
+    atest_dataset_with_video_and_audio_and_ocr()

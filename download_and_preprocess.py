@@ -1,13 +1,16 @@
+import json
 import os
 import pickle
 import time
 import torch
 import tqdm
-from utils import load_db_json, get_video_frames, get_audio_frames, get_ocr_frames
+import numpy as np
+from utils import load_db_json, get_video_frames, get_audio_frames, get_ocr_frames, OCR_RELEVANT_VIDEO_IDS_PATH, \
+    gather_ocr_videos
 import torch.nn as nn
 from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
 from transformers import AutoFeatureExtractor, HubertModel
-
+from models.OCR_model import OCRmodel
 
 # Constants
 
@@ -21,6 +24,15 @@ task = 'mc_question'
 N_SEGMENTS = 1
 MINI_BATCH_SIZE = 16
 STORE_BATCH_SIZE = 4
+
+if os.path.exists(OCR_RELEVANT_VIDEO_IDS_PATH):
+    with open(OCR_RELEVANT_VIDEO_IDS_PATH, 'r') as fin:
+        OCR_RELEVANCE = json.load(fin)
+else:
+    gather_ocr_videos(
+        ['./data/mc_question_train.json', './data/mc_question_valid.json', './data/mc_question_test.json'])
+    with open(OCR_RELEVANT_VIDEO_IDS_PATH, 'r') as fin:
+        OCR_RELEVANCE = json.load(fin)
 
 
 def load_dataset(d):
@@ -44,9 +56,8 @@ elif EXTRACTED_MODALITY == 'Audio':
     model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
     model = model.to('cuda')
 elif EXTRACTED_MODALITY == 'Ocr':
-    processor = AutoFeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
-    model = HubertModel.from_pretrained("facebook/hubert-base-ls960")
-    model = model.to('cuda')
+    model = OCRmodel(dual_pass=True)
+    model.to('cuda')
 else:
     raise NotImplementedError
 
@@ -84,42 +95,26 @@ def get_video_frames_wrapper(data_items):
     vid_frames = final_logits.mean(1)
     return vid_frames
 
+
 def get_ocr_frames_wrapper(data_items):
     loaded_ocrs = []
     for i in range(STORE_BATCH_SIZE):
         vid_frames = get_ocr_frames(data_items[i],
                                     video_folder,
                                     override_video_name=False,
-                                    resize_to=224,
+                                    resize_to=300,
                                     num_samples=16,
                                     n_segments=N_SEGMENTS)
         for s in range(N_SEGMENTS):
-            for f in vid_frames[s]:
-                loaded_ocrs.append(f)
+            loaded_ocrs.append(vid_frames[s])
+    ocr_frames = []
+    loaded_ocrs = np.concatenate(loaded_ocrs, axis=0)
+    for i in range(len(loaded_ocrs) // MINI_BATCH_SIZE):
+        slice = loaded_ocrs[MINI_BATCH_SIZE * i: MINI_BATCH_SIZE * (i + 1)]
+        ocr_frames.append(model(slice))
+    assert len(ocr_frames) == STORE_BATCH_SIZE
+    return ocr_frames
 
-    inputs = processor(loaded_ocrs, return_tensors="pt")
-    inputs['pixel_values'] = inputs['pixel_values'].resize(STORE_BATCH_SIZE * N_SEGMENTS, 16,
-                                                           inputs['pixel_values'].size()[2],
-                                                           inputs['pixel_values'].size()[3],
-                                                           inputs['pixel_values'].size()[4])
-    final_logits = []
-    if N_SEGMENTS >= MINI_BATCH_SIZE:
-        for i in range(N_SEGMENTS // MINI_BATCH_SIZE):
-            semi_input = inputs['pixel_values'][i * MINI_BATCH_SIZE: (i + 1) * MINI_BATCH_SIZE].to('cuda')
-            with torch.cuda.amp.autocast(dtype=torch.float16):
-                with torch.no_grad():
-                    outputs = model(pixel_values=semi_input)
-                    final_logits = outputs.logits
-                    final_logits = final_logits.reshape(STORE_BATCH_SIZE, N_SEGMENTS, -1)
-    else:
-        semi_input = inputs['pixel_values'].to('cuda')
-        with torch.cuda.amp.autocast(dtype=torch.float16):
-            with torch.no_grad():
-                outputs = model(pixel_values=semi_input)
-                final_logits = outputs.logits
-                final_logits = final_logits.reshape(STORE_BATCH_SIZE, N_SEGMENTS, -1)
-    vid_frames = final_logits.mean(1)
-    return vid_frames
 
 def maybe_get_video_frames(data_items, n_segments=1):
     for i in range(len(data_items)):
@@ -134,6 +129,23 @@ def maybe_get_video_frames(data_items, n_segments=1):
                                                  data_items[j]['metadata']['video_id']) + f'_seg_{n_segments}.pkl'
                 with open(video_file_pickle, 'wb') as fout:
                     pickle.dump(vid_frames[j], fout)
+            return
+    return
+
+
+def maybe_get_ocr_frames(data_items, n_segments=1):
+    for i in range(len(data_items)):
+        video_file_pickle = os.path.join(video_folder,
+                                         data_items[i]['metadata']['video_id']) + f'_ocrseg_{n_segments}.pkl'
+        if os.path.exists(video_file_pickle) or not (data_items[i]['metadata']['video_id'] in OCR_RELEVANCE):
+            continue
+        else:
+            ocr_frames = get_ocr_frames_wrapper(data_items=data_items)
+            for j in range(len(data_items)):
+                video_file_pickle = os.path.join(video_folder,
+                                                 data_items[j]['metadata']['video_id']) + f'_ocrseg_{n_segments}.pkl'
+                with open(video_file_pickle, 'wb') as fout:
+                    pickle.dump({'ocr': ocr_frames[j]}, fout)
             return
     return
 
@@ -182,6 +194,7 @@ def maybe_get_audio_frames(data_items, n_segments=1):
             return
     return
 
+
 if EXTRACTED_MODALITY == 'Video':
     s = time.time()
     for batch_idx in tqdm.trange(total_length // STORE_BATCH_SIZE):
@@ -200,6 +213,16 @@ elif EXTRACTED_MODALITY == 'Audio':
             real_jdx = batch_idx * STORE_BATCH_SIZE + jdx
             data_items.append(pt_db_list[real_jdx])
         maybe_get_audio_frames(data_items=data_items, n_segments=1)
+    t = time.time() - s
+    print(t)
+elif EXTRACTED_MODALITY == 'Ocr':
+    s = time.time()
+    for batch_idx in tqdm.trange(total_length // STORE_BATCH_SIZE):
+        data_items = []
+        for jdx in range(STORE_BATCH_SIZE):
+            real_jdx = batch_idx * STORE_BATCH_SIZE + jdx
+            data_items.append(pt_db_list[real_jdx])
+        maybe_get_ocr_frames(data_items=data_items, n_segments=1)
     t = time.time() - s
     print(t)
 else:

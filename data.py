@@ -215,15 +215,11 @@ class PerceptionDataset:
         if data_item['metadata']['video_id'] in self.ocr_relevance:
             vid_frames = get_ocr_frames(data_item, self.video_folder, override_video_name=False, resize_to=300,
                                         num_samples=16, n_segments=N_SEGMENTS)[0]
-            ocr_frames = []
+
             inputs = self.ocr_processor(vid_frames)
-            identified_strings = self.ocr_model(inputs)
-            for f in identified_strings:
-                ocr_frames.append(f)
+            ocr_frames = self.ocr_model(inputs)
         else:
-            ocr_frames = []
-        # if self.auto_unload:
-        #     self.__unload_on_demand__('ocr') No need to unload OCR module (It is superlightweight)
+            ocr_frames = torch.zeros(size=(1, 768))
         return ocr_frames
 
     def _maybe_get_video_frames(self, data_item, n_segments=1):
@@ -352,7 +348,7 @@ class PerceptionDataset:
             else:
                 aud_frames = None
             if self.use_ocr:
-                ocr_frames = []
+                ocr_frames = torch.rand(size=(1, 768))
             else:
                 ocr_frames = None
         else:
@@ -482,19 +478,24 @@ def atest_dataset_union():
 
 
 def atest_dataset_with_video_and_audio_and_ocr():
-    cfg = {'video_folder': './data/test/',
+    split = 'test'
+    cfg = {'video_folder': f'./data/{split}/videos' if split == 'train' else f'./data/{split}',
            'task': 'mc_question',
-           'split': 'test',
+           'split': split,
            'js_only': False,
            'use_audio': True,
            'use_ocr': True,
            }
-
-    train_db_path = 'data/mc_question_test.json'
+    with open(OCR_RELEVANT_VIDEO_IDS_PATH, 'r') as fin:
+        ocr_list = json.load(fin)
+    train_db_path = f"data/mc_question_{cfg['split']}.json"
     train_db_dict = load_db_json(train_db_path)
     dataset = PerceptionDataset(train_db_dict, **cfg)
     for item in tqdm.tqdm(dataset):
-        pass
+        if item['metadata']['video_id'] in ocr_list:
+            assert item['ocr'].sum() >= 0
+        else:
+            assert item['ocr'].sum() == 0
     print("End")
 
 

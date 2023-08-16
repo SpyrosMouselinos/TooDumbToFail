@@ -199,7 +199,6 @@ def gather_ocr_videos(db_files):
     return marked_for_ocr
 
 
-
 def load_mp4_to_frames(filename: str, indices=None, resize_to=None) -> np.array:
     """Loads an MP4 video file and returns its frames as a NumPy array.
 

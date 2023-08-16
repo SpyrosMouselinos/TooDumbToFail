@@ -12,11 +12,8 @@ from utils import ANSWER_DATA_PATH
 import pytorch_model_summary as pms
 
 
-
 def save_checkpoint(state, filename='checkpoint'):
     torch.save(state, filename + '.pth')
-
-
 
 
 class EncoderBlockV3(nn.Module):
@@ -69,9 +66,11 @@ class EncoderBlockV3(nn.Module):
 
 
 class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
-    def __init__(self, v_dim=768,
+    def __init__(self,
+                 v_dim=768,
                  l_dim=384,
                  o_dim=None,
+                 ocr_dim=768,
                  use_embedding=False,
                  common_dropout=0.25,
                  use_aux_loss=0,
@@ -81,6 +80,7 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
         self.use_embedding = use_embedding
         self.v_dim = v_dim
         self.q_dim = l_dim
+        self.ocr_dim = ocr_dim
         self.common_dropout = common_dropout
         self.use_aux_loss = use_aux_loss
         if o_dim is None:
@@ -99,6 +99,10 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
         self.a_block = nn.Sequential(self.common_audio_base)
         self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
 
+        self.common_ocr_base = nn.Linear(self.ocr_dim, self.emb_dim)
+        self.ocr_block = nn.Sequential(self.common_ocr_base)
+        self.ocr_block2 = nn.Sequential(self.common_ocr_base, self.common_dropout)
+
         if not self.use_embedding:
             self.common_option_base = nn.Linear(in_features=6370, out_features=self.emb_dim)
             self.o_block = nn.Sequential(self.common_option_base)
@@ -108,7 +112,7 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
         # Encoder Blocks#
         self.visual_encoder = EncoderBlockV3(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
         self.audio_encoder = EncoderBlockV3(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
-        # self.option_encoder = EncoderBlockV1(embed_dim=self.emb_dim, num_heads=16, add_skip=False)
+        self.ocr_encoder = EncoderBlockV3(embed_dim=self.emb_dim, num_heads=8, add_skip=False)
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
 
@@ -143,7 +147,7 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
             scores = scores.squeeze(1)
         return self.metric_fn(scores, gt)
 
-    def forward(self, v, n_feats, aud, n_auds, o, n_answ, gt_answer_int=None, **args):
+    def forward(self, v, n_feats, aud, n_auds, ocr, n_ocrs, o, n_answ, ocr_flag=None, gt_answer_int=None, **args):
         v = self.v_block(v)
         v2 = self.v_block2(n_feats)
         aud = self.a_block(aud)
@@ -157,7 +161,14 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
         #############################################
         visually_informed_answer = self.visual_encoder(v.unsqueeze(1), v2, o2)
         audio_informed_answer = self.audio_encoder(aud.unsqueeze(1), aud2, o2)
-        mix_informed_answer = visually_informed_answer + audio_informed_answer
+        ### Mini-Mask ###
+        if ocr.sum() > 0:
+            ocr = self.ocr_block(ocr)
+            ocr2 = self.ocr_block2(n_ocrs)
+            ocr_informed_answer = self.ocr_encoder(ocr.unsqueeze(1), ocr2, o2)
+        else:
+            ocr_informed_answer = 0
+        mix_informed_answer = visually_informed_answer + audio_informed_answer + ocr_informed_answer
         options_informed_answer = mix_informed_answer * o
         options_informed_answer = options_informed_answer.sum(1)
         #############################################
@@ -186,30 +197,48 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
         return scores, None, None
 
 
-class NoBrainEncoderBlock(nn.Module):
+class NoBrainEncoderBlockV3(nn.Module):
     def __init__(self, skip_self=True):
         super().__init__()
-        self.temp = nn.Parameter(data=-0.4054 * torch.ones(1, device='cuda'), requires_grad=True)
+        self.temp_vid = nn.Parameter(data=torch.zeros(1, device='cuda'), requires_grad=True)
+        self.temp_aud = nn.Parameter(data=torch.zeros(1, device='cuda'), requires_grad=True)
+        self.temp_ocr = nn.Parameter(data=torch.zeros(1, device='cuda'), requires_grad=True)
         self.topk = TopKGroup(skip_self=skip_self, top_k=25)
 
-    def forward(self, q1, k1, q2, k2, mask=None, **args):
-        a = torch.nn.functional.sigmoid(self.temp)
+    def forward(self, q1, k1, q2, k2, q3, k3, mask=None, **args):
+        vid_gate = torch.nn.functional.sigmoid(self.temp_vid)
+        aud_gate = torch.nn.functional.sigmoid(self.temp_aud)
+        ocr_gate = torch.nn.functional.sigmoid(self.temp_ocr)
+
         q1 = torch.nn.functional.normalize(q1, p=2, dim=-1)
         k1 = torch.nn.functional.normalize(k1, p=2, dim=-1)
         q2 = torch.nn.functional.normalize(q2, p=2, dim=-1)
         k2 = torch.nn.functional.normalize(k2, p=2, dim=-1)
+        q3 = torch.nn.functional.normalize(q3, p=2, dim=-1)
+        k3 = torch.nn.functional.normalize(k3, p=2, dim=-1)
+
         scores1 = torch.nn.functional.cosine_similarity(q1.unsqueeze(1), k1, dim=-1)
 
         if mask is not None:
             scores1 *= mask
         scores1 = torch.clip(scores1, 0, 1)
+
+
         scores2 = torch.nn.functional.cosine_similarity(q2.unsqueeze(1), k2, dim=-1)
         if mask is not None:
             scores2 *= mask
         scores2 = torch.clip(scores2, 0, 1)
+
+        scores3 = torch.nn.functional.cosine_similarity(q3.unsqueeze(1), k3, dim=-1)
+
+        if mask is not None:
+            scores3 *= mask
+        scores3 = torch.clip(scores3, 0, 1)
+
         attention1 = F.softmax(scores1, dim=-1)
         attention2 = F.softmax(scores2, dim=-1)
-        attention = attention1 * a + (1 - a) * attention2
+        attention3 = F.softmax(scores3, dim=-1)
+        attention = attention1 * vid_gate + attention2 * aud_gate + attention3 * ocr_gate
         attention = self.topk(attention)
         return attention
 
@@ -246,7 +275,7 @@ class TopKGroup(nn.Module):
         return score_vector
 
 
-class IterableLookUp(Dataset):
+class IterableLookUpV2(Dataset):
     def __init__(self,
                  active_db,
                  cached_db=None,
@@ -308,6 +337,8 @@ class IterableLookUp(Dataset):
             active_video_frames = active_entry['frames'].unsqueeze(0)
             # Get YOUR AUDIO #
             active_audio_frames = active_entry['audio'].unsqueeze(0)
+            # Get YOUR OCR #
+            active_ocr_frames = active_entry['ocr']
             # Get YOUR QUESTIONS #
             for active_question_items in active_entry['mc_question']:
                 # Get YOUR OPTIONS #
@@ -320,9 +351,10 @@ class IterableLookUp(Dataset):
                 # Get the same question in the cached dataset #
                 cached_question_items = cached_db[active_question_items['question']]
 
-                # Get the Video and the Audio Frames from it #
+                # Get the Video and the Audio and OCR Frames from it #
                 cached_video_frames = torch.stack(cached_question_items['video_emb'], dim=0)
                 cached_audio_frames = torch.stack(cached_question_items['audio_emb'], dim=0)
+                cached_ocr_frames = torch.stack(cached_question_items['ocr_emb'], dim=0).squeeze(1)
 
                 # Get the Answers from it #
                 cached_answer_frames = torch.LongTensor(cached_question_items['answer'])
@@ -333,30 +365,22 @@ class IterableLookUp(Dataset):
                 # Find top k audio frames #
                 top_k_audio_frames = cached_audio_frames
 
+                # Find top k ocr frames #
+                top_k_ocr_frames = cached_ocr_frames
+
                 # Find top k answers #
                 top_k_answers = cached_answer_frames.squeeze(0)
                 top_k_answers = top_k_answers
 
-                # PAD
-                # pad_length = 688 - top_k_video_frames.size()[0]
-                # if pad_length > 0:
-                #     for _ in range(pad_length):
-                #         top_k_video_frames = torch.concat(
-                #             [top_k_video_frames, torch.zeros(size=(1, top_k_video_frames.size(-1)), device='cpu')],
-                #             dim=-2)
-                #         top_k_audio_frames = torch.concat(
-                #             [top_k_audio_frames, torch.zeros(size=(1, top_k_audio_frames.size(-1)), device='cpu')],
-                #             dim=-2)
-                #         top_k_answers = torch.concat(
-                #             [top_k_answers, torch.zeros(size=(1,), device='cpu')])
-
                 db.update({idx: {
                     'v': active_video_frames.squeeze(0),
                     'aud': active_audio_frames.squeeze(0),
+                    'ocr': active_ocr_frames.squeeze(0),
                     'q': active_question_items['question'],
                     'o': active_option_frames,
                     'n_feats': top_k_video_frames,
                     'n_auds': top_k_audio_frames,
+                    'n_ocrs': top_k_ocr_frames,
                     'n_answers': top_k_answers,
                     'gt_answer_int': active_gt_frames,
                 }})
@@ -374,7 +398,7 @@ class IterableLookUp(Dataset):
 
 
 class OCRVideoAudioMCVQA:
-    """Multiple-Choice vQA Model using Video and Audio Inputs, Frequency  and Q/A as embedding pairs"""
+    """Multiple-Choice vQA Model using Video Audio and OCR Inputs, Frequency  and Q/A as embedding pairs"""
 
     def __init__(self,
                  active_ds,
@@ -387,11 +411,13 @@ class OCRVideoAudioMCVQA:
         self.lfoh = look_for_one_hot
         self.use_embedding = use_embedding
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
-        self.model = MultiRetrievalAugmentedEmbeddingV3(use_embedding=use_embedding, common_dropout=common_dropout,
+        self.model = MultiRetrievalAugmentedEmbeddingV3(use_embedding=use_embedding,
+                                                        common_dropout=common_dropout,
                                                         use_aux_loss=use_aux_loss)
         self.model.to(device='cuda')
         v = torch.zeros(1, 768).to('cuda')
         aud = torch.zeros(1, 768).to('cuda')
+        ocr = torch.zeros(1, 768).to('cuda')
         if self.use_embedding:
             o = torch.zeros(1, 3, dtype=torch.long).to('cuda')
             n_answ = torch.zeros(1, 25, dtype=torch.long).to('cuda')
@@ -400,7 +426,8 @@ class OCRVideoAudioMCVQA:
             n_answ = torch.zeros(1, 25, 6370).to('cuda')
         n_feats = torch.zeros(1, 25, 768).to('cuda')
         n_auds = torch.zeros(1, 25, 768).to('cuda')
-        pms.summary(self.model, v, n_feats, aud, n_auds, o, n_answ, show_input=True, print_summary=True)
+        n_ocrs = torch.zeros(1, 25, 768).to('cuda')
+        pms.summary(self.model, v, n_feats, aud, n_auds, ocr, n_ocrs, o, n_answ, show_input=True, print_summary=True)
         self._active_ds = copy.deepcopy(active_ds)
         if cache_ds is not None:
             self._cache_ds = self.build_video_answer_db_2(cache_ds)
@@ -436,7 +463,7 @@ class OCRVideoAudioMCVQA:
                 try:
                     question_db[question['question']]
                 except KeyError:
-                    question_db[question['question']] = {'video_emb': [], 'audio_emb': [], 'answer': [],
+                    question_db[question['question']] = {'video_emb': [], 'audio_emb': [], 'ocr_emb': [], 'answer': [],
                                                          'answer_int': [], 'options': []}
 
                 if self.lfoh:
@@ -447,6 +474,7 @@ class OCRVideoAudioMCVQA:
                 answer_int = int(question['answer_id'])
                 video_emb = entry['frames'].cpu()
                 audio_emb = entry['audio'].cpu()
+                ocr_emb = entry['ocr'].cpu()
 
                 if self.lfoh:
                     options = [self.answer_data_json[f]['int_index'] for f in question['options']]
@@ -454,6 +482,7 @@ class OCRVideoAudioMCVQA:
                     options = question['options']
                 question_db[question['question']]['video_emb'].append(video_emb)
                 question_db[question['question']]['audio_emb'].append(audio_emb)
+                question_db[question['question']]['ocr_emb'].append(ocr_emb)
                 question_db[question['question']]['answer'].append(answer)
                 question_db[question['question']]['answer_int'].append(answer_int)
                 question_db[question['question']]['options'].append(options)
@@ -463,10 +492,10 @@ class OCRVideoAudioMCVQA:
     def fit(self, lr=0.0005, bs=128, epochs=100, val_external_dataset=None):
         FIXED_BATCH_SIZE = 1
         self.model.train()
-        dataset = IterableLookUp(active_db=self._active_ds,
-                                 cached_db=self._cache_ds,
-                                 model_emb=self.embedding_transformer,
-                                 answer_data_json=self.answer_data_json, use_embedding=self.use_embedding)
+        dataset = IterableLookUpV2(active_db=self._active_ds,
+                                   cached_db=self._cache_ds,
+                                   model_emb=self.embedding_transformer,
+                                   answer_data_json=self.answer_data_json, use_embedding=self.use_embedding)
 
         dataloader = DataLoader(dataset=dataset,
                                 batch_size=FIXED_BATCH_SIZE,
@@ -484,24 +513,30 @@ class OCRVideoAudioMCVQA:
                 real_index = (epoch_idx * len(dataloader)) + step_idx
                 v, \
                     aud, \
+                    ocr, \
                     o, \
                     n_feats, \
                     n_answ, \
                     n_auds, \
+                    n_ocrs, \
                     gt_answer_int = batch['v'], \
                     batch['aud'], \
+                    batch['ocr'], \
                     batch['o'], \
                     batch['n_feats'], \
                     batch['n_answers'], \
                     batch['n_auds'], \
+                    batch['n_ocrs'], \
                     batch['gt_answer_int']
                 _, loss, metric = self.model(v=v,
                                              aud=aud,
+                                             ocr=ocr,
                                              o=o,
                                              n_ids=None,
                                              n_feats=n_feats,
                                              n_answ=n_answ,
                                              n_auds=n_auds,
+                                             n_ocrs=n_ocrs,
                                              gt_answer_int=gt_answer_int)
 
                 epoch_loss += loss.detach().item()
@@ -522,7 +557,7 @@ class OCRVideoAudioMCVQA:
         save_checkpoint({
             'state_dict': self.model.state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, f'Model_v{self.model_version}')
+        }, f'OCRAVQA_Model')
 
         # Freeze the video_model #
         self.model.eval()
@@ -535,10 +570,10 @@ class OCRVideoAudioMCVQA:
             active_db = self._active_ds
         else:
             active_db = val_dataset
-        dataset = IterableLookUp(active_db=active_db,
-                                 cached_db=self._cache_ds,
-                                 model_emb=self.embedding_transformer,
-                                 answer_data_json=self.answer_data_json, use_embedding=self.use_embedding)
+        dataset = IterableLookUpV2(active_db=active_db,
+                                   cached_db=self._cache_ds,
+                                   model_emb=self.embedding_transformer,
+                                   answer_data_json=self.answer_data_json, use_embedding=self.use_embedding)
 
         dataloader = DataLoader(dataset=dataset,
                                 batch_size=FIXED_BATCH_SIZE,
@@ -552,24 +587,28 @@ class OCRVideoAudioMCVQA:
             for step_idx, batch in enumerate(pbar := tqdm.tqdm(dataloader)):
                 v, \
                     aud, \
+                    ocr, \
                     o, \
                     n_feats, \
                     n_answ, \
                     n_auds, \
-                    gt_answer_int = batch['v'], \
+                    n_ocrs = batch['v'], \
                     batch['aud'], \
+                    batch['ocr'], \
                     batch['o'], \
                     batch['n_feats'], \
                     batch['n_answers'], \
                     batch['n_auds'], \
-                    batch['gt_answer_int']
+                    batch['n_ocrs']
                 _sim_scores, _, _ = self.model(v=v,
                                                aud=aud,
+                                               ocr=ocr,
                                                o=o,
                                                n_ids=None,
                                                n_feats=n_feats,
                                                n_answ=n_answ,
                                                n_auds=n_auds,
+                                               n_ocrs=n_ocrs,
                                                gt_answer_int=None)
                 try:
                     for f in _sim_scores.squeeze().argmax(dim=-1):
@@ -596,6 +635,7 @@ class OCRVideoAudioMCVQA:
                  frames,
                  question,
                  audio_frames=None,
+                 ocr_frames=None,
                  option_frames=None,
                  n_ids=None, use_embedding=False,
                  **args):
@@ -618,13 +658,20 @@ class OCRVideoAudioMCVQA:
                 audb_frames = torch.stack(stored_response['audio_emb'], dim=0)
             elif len(stored_response['audio_emb'][0].size()) == 2:
                 audb_frames = torch.cat(stored_response['audio_emb'], dim=0)
+        if ocr_frames is not None:
+            if len(stored_response['ocr_emb'][0].size()) == 1:
+                ocrdb_frames = torch.stack(stored_response['ocr_emb'], dim=0)
+            elif len(stored_response['ocr_emb'][0].size()) == 2:
+                ocrdb_frames = torch.cat(stored_response['ocr_emb'], dim=0)
         if option_frames is not None:
             no_frames = stored_response['answer']
 
         _frames = frames.unsqueeze(0).to('cuda')
         _audio_frames = audio_frames.unsqueeze(0).to('cuda')
+        _ocr_frames = ocr_frames.unsqueeze(0).to('cuda')
         _db_frames = db_frames.unsqueeze(0).to('cuda')
         _audb_frames = audb_frames.unsqueeze(0).to('cuda')
+        _ocrdb_frames = ocrdb_frames.unsqueeze(0).to('cuda')
         ### Fix incoming frames ###
         if not self.answer_data_json is None and option_frames is not None:
             o_ = torch.LongTensor([self.answer_data_json[f]['int_index'] for f in option_frames])
@@ -648,11 +695,13 @@ class OCRVideoAudioMCVQA:
             _sim_scores, _, _ = self.model(
                 v=_frames,
                 aud=_audio_frames,
+                ocr=_ocr_frames,
                 o=o_,
                 n_ids=None,
                 n_feats=_db_frames,
                 n_answ=_no_frames,
                 n_auds=_audb_frames,
+                n_ocrs=_ocrdb_frames,
                 gt_answer_int=None)
         gg = _sim_scores.squeeze()
         answer_id = [gg.argmax().item()]

@@ -393,88 +393,7 @@ class PerceptionDataset:
         return self
 
 
-def atest_dataset_with_json_only():
-    cfg = {'video_folder': './data/videos/',
-           'task': 'mc_question',
-           'split': 'valid',
-           'js_only': True}
 
-    valid_db_path = 'data/mc_question_valid.json'
-    valid_db_dict = load_db_json(valid_db_path)
-    dataset = PerceptionDataset(valid_db_dict, **cfg)
-    for item in dataset:
-        print(item)
-    print("End")
-
-
-def atest_dataset_with_video():
-    cfg = {'video_folder': './data/sample/videos/',
-           'task': 'mc_question',
-           'split': 'valid',
-           'js_only': False}
-
-    valid_db_path = 'data/mc_question_valid.json'
-    valid_db_dict = load_db_json(valid_db_path)
-    dataset = PerceptionDataset(valid_db_dict, **cfg)
-    for item in tqdm.tqdm(dataset):
-        pass
-    print("End")
-
-
-def atest_dataset_with_video_and_audio():
-    cfg = {'video_folder': './data/train/videos/',
-           'task': 'mc_question',
-           'split': 'train',
-           'js_only': False,
-           'use_audio': True,
-           }
-
-    train_db_path = 'data/mc_question_train.json'
-    train_db_dict = load_db_json(train_db_path)
-    dataset = PerceptionDataset(train_db_dict, **cfg)
-    for item in tqdm.tqdm(dataset):
-        pass
-    print("End")
-
-
-def atest_dataset_union():
-    train_db_path = 'data/mc_question_train.json'
-    train_db_dict = load_db_json(train_db_path)
-
-    valid_db_path = 'data/mc_question_valid.json'
-    valid_db_dict = load_db_json(valid_db_path)
-
-    train_cfg = {'video_folder': './data/train/videos/',
-                 'task': 'mc_question',
-                 'split': 'train',
-                 'js_only': False,
-                 'use_audio': True,
-                 }
-    train_mc_vqa_dataset = PerceptionDataset(train_db_dict, **train_cfg)
-    valid_cfg = {'video_folder': './data/valid/',
-                 'task': 'mc_question',
-                 'split': 'valid',
-                 'js_only': False,
-                 'use_audio': True,
-                 }
-    val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
-
-    original_length = copy.deepcopy(len(train_mc_vqa_dataset))
-
-    train_mc_vqa_dataset.union(val_mc_vqa_dataset)
-    for i, item in enumerate(train_mc_vqa_dataset):
-        if i < original_length - 1:
-            pass
-        else:
-            print(item)
-
-            break
-
-    for i in val_mc_vqa_dataset:
-        print(i - item)
-        break
-
-    print("End")
 
 
 def atest_dataset_with_video_and_audio_and_ocr():
@@ -500,8 +419,4 @@ def atest_dataset_with_video_and_audio_and_ocr():
 
 
 if __name__ == '__main__':
-    # test_dataset_with_json_only()
-    # test_dataset_with_video_and_audio()
-    # atest_dataset_union()
-    # test_dataset_addition()
     atest_dataset_with_video_and_audio_and_ocr()

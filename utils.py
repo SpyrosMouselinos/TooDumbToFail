@@ -65,7 +65,7 @@ CAT = AREA + REASONING + TAG
 DATA_PATH = data_path = './data/'
 TRAIN_DATA_PATH = train_data_path = DATA_PATH + 'train/'
 VALID_DATA_PATH = valid_data_path = DATA_PATH + 'valid/'
-ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keys.json' # Use gather answers to make this
+ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keysword_overlap.json' # Use gather answers to make this
 OCR_RELEVANT_VIDEO_IDS_PATH = ocr_relevant_video_ids_path = DATA_PATH + 'ocr_rel_videos.json' # Use gather ocr videos to make this
 
 def download_and_unzip(url: str, destination: str):

@@ -9,6 +9,7 @@ from data import PerceptionDataset
 from models.FreqBaseline import FreqMCVQABaseline, VideoFreqMCVQABaseline, VideoLangMCVQABaseline
 from models.LearnableAudioBaseline import VideoAudioFreqLearnMCVQA
 from models.LearnableBaseline import VideoLangLearnMCVQA, VideoFreqLearnMCVQA
+from models.OcrAugmentedModel import OCRVideoAudioMCVQA
 from utils import load_db_json, CAT, calc_top, calc_top_by_cat
 import numpy as np
 
@@ -26,6 +27,7 @@ train_cfg = {'video_folder': './data/train/videos/',
              'split': 'train',
              'js_only': False,
              'use_audio': True,
+             'use_ocr': True,
              }
 train_mc_vqa_dataset = PerceptionDataset(train_db_dict, **train_cfg)
 valid_cfg = {'video_folder': './data/valid/',
@@ -33,6 +35,7 @@ valid_cfg = {'video_folder': './data/valid/',
              'split': 'valid',
              'js_only': False,
              'use_audio': True,
+             'use_ocr': True,
              }
 val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
 test_cfg = {'video_folder': './data/test/',
@@ -40,16 +43,24 @@ test_cfg = {'video_folder': './data/test/',
             'split': 'test',
             'js_only': False,
             'use_audio': True,
+            'use_ocr': True,
             }
 
 test_mc_vqa_dataset = PerceptionDataset(test_db_dict, **test_cfg)
-model = VideoAudioFreqLearnMCVQA(active_ds=val_mc_vqa_dataset,
-                                 cache_ds=train_mc_vqa_dataset.union(val_mc_vqa_dataset),
-                                 use_embedding=True,
-                                 use_aux_loss=0,
-                                 overconfidence_loss=None, model_version=1)
-
-model.load_weights('Model_Trained.pth.pth')
+# model = VideoAudioFreqLearnMCVQA(active_ds=val_mc_vqa_dataset,
+#                                  cache_ds=train_mc_vqa_dataset.union(val_mc_vqa_dataset),
+#                                  use_embedding=True,
+#                                  use_aux_loss=0,
+#                                  overconfidence_loss=None, model_version=1)
+#
+# model.load_weights('Model_Trained.pth.pth')
+# model.model.eval()
+train_mc_vqa_dataset.union(val_mc_vqa_dataset)
+model = OCRVideoAudioMCVQA(active_ds=None,
+                           cache_ds=train_mc_vqa_dataset,
+                           use_embedding=False,
+                           use_aux_loss=0,
+                           model_version=4, top_k=25, train_skip_self=False)
 model.model.eval()
 answers = {}
 for video_item in tqdm.tqdm(test_mc_vqa_dataset):
@@ -63,6 +74,7 @@ for video_item in tqdm.tqdm(test_mc_vqa_dataset):
             frames=video_item['frames'],
             question=q,
             audio_frames=video_item['audio'],
+            ocr_frames=video_item['ocr'],
             option_frames=q['options'],
             shots=-1,
             top_k=25,  # 0.6046@25/Pre 0.4
@@ -81,5 +93,5 @@ for video_item in tqdm.tqdm(test_mc_vqa_dataset):
 
     answers[video_id] = video_answers
 
-with open('test_results_trainPlusval_VerbsNouns.json', 'w') as my_file:
+with open('test_results_static_retrieve_ocr.json', 'w') as my_file:
     json.dump(answers, my_file)

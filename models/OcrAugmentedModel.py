@@ -74,7 +74,7 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
                  use_embedding=False,
                  common_dropout=0.25,
                  use_aux_loss=0,
-                 overconfidence_loss=0.0):
+                 overconfidence_loss=0.0, top_k=25, train_skip_self=False):
         super().__init__()
         self.overconfidence_loss = overconfidence_loss
         self.use_embedding = use_embedding
@@ -87,19 +87,19 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
             self.o_dim = self.q_dim
         else:
             self.o_dim = o_dim
-        self.emb_dim = 128
+        self.emb_dim = 768
         # Common Dropout #
         self.common_dropout = nn.Dropout1d(p=self.common_dropout)
         # Common BLOCKS #
-        self.common_vision_base = nn.Linear(self.v_dim, self.emb_dim)
+        self.common_vision_base = nn.Identity()
         self.v_block = nn.Sequential(self.common_vision_base)
         self.v_block2 = nn.Sequential(self.common_vision_base, self.common_dropout)
 
-        self.common_audio_base = nn.Linear(self.v_dim, self.emb_dim)
+        self.common_audio_base = nn.Identity()
         self.a_block = nn.Sequential(self.common_audio_base)
         self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
 
-        self.common_ocr_base = nn.Linear(self.ocr_dim, self.emb_dim)
+        self.common_ocr_base = nn.Identity()
         self.ocr_block = nn.Sequential(self.common_ocr_base)
         self.ocr_block2 = nn.Sequential(self.common_ocr_base, self.common_dropout)
 
@@ -197,25 +197,157 @@ class MultiRetrievalAugmentedEmbeddingV3(nn.Module):
         return scores, None, None
 
 
-class NoBrainEncoderBlockV3(nn.Module):
-    def __init__(self, skip_self=True):
+class MultiRetrievalAugmentedEmbeddingV4(nn.Module):
+    def __init__(self,
+                 v_dim=768,
+                 l_dim=384,
+                 o_dim=None,
+                 ocr_dim=768,
+                 use_embedding=False,
+                 common_dropout=0.25,
+                 use_aux_loss=0,
+                 overconfidence_loss=0.0, top_k=25, train_skip_self=False):
+        super().__init__()
+        self.overconfidence_loss = overconfidence_loss
+        self.use_embedding = use_embedding
+        self.v_dim = v_dim
+        self.q_dim = l_dim
+        self.ocr_dim = ocr_dim
+        self.common_dropout = common_dropout
+        self.use_aux_loss = use_aux_loss
+        if o_dim is None:
+            self.o_dim = self.q_dim
+        else:
+            self.o_dim = o_dim
+        self.emb_dim = 128
+        # Common Dropout #
+        self.common_dropout = nn.Dropout1d(p=self.common_dropout)
+        # Common BLOCKS #
+        self.common_vision_base = nn.Identity()
+        self.v_block = nn.Sequential(self.common_vision_base)
+        self.v_block2 = nn.Sequential(self.common_vision_base, self.common_dropout)
+
+        self.common_audio_base = nn.Identity()
+        self.a_block = nn.Sequential(self.common_audio_base)
+        self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
+
+        self.common_ocr_base = nn.Identity()
+        self.ocr_block = nn.Sequential(self.common_ocr_base)
+        self.ocr_block2 = nn.Sequential(self.common_ocr_base, self.common_dropout)
+
+        if not self.use_embedding:
+            # self.common_option_base = nn.Linear(in_features=6370, out_features=self.emb_dim)
+            self.common_option_base = nn.Identity()
+            self.o_block = nn.Sequential(self.common_option_base)
+            self.o_block2 = nn.Sequential(self.common_option_base, self.common_dropout)
+        else:
+            self.embedding_library = nn.Embedding(num_embeddings=6370, embedding_dim=self.emb_dim)
+        # Encoder Blocks#
+        self.similarity_suggestor = NoBrainEncoderBlockV4(skip_self=train_skip_self, top_k=top_k)
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
+
+    def calc_loss(self, scores, gt):
+        """
+        Calculate Cross-Entropy Loss
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+
+        return self.loss_fn(scores, gt)
+
+    def calc_acc(self, scores, gt):
+        """
+        Calculate Accuracy
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+        scores = scores.argmax(dim=-1)
+        if len(scores.size()) > 1:
+            scores = scores.squeeze(1)
+        return self.metric_fn(scores, gt)
+
+    def forward(self, v, n_feats, aud, n_auds, ocr, n_ocrs, o, n_answ, ocr_flag=None, gt_answer_int=None, **args):
+        v = self.v_block(v)
+        v2 = self.v_block2(n_feats)
+        aud = self.a_block(aud)
+        aud2 = self.a_block2(n_auds)
+        if not self.use_embedding:
+            o = self.o_block(o)
+            o2 = self.o_block2(n_answ)
+        else:
+            o = self.embedding_library(o)
+            o2 = self.embedding_library(n_answ)
+        #############################################
+        ### Mini-Mask ###
+        if ocr.sum() > 0:
+            ocr = self.ocr_block(ocr)
+            ocr2 = self.ocr_block2(n_ocrs)
+        else:
+            ocr = None
+            ocr2 = None
+        mix_informed_answer = self.similarity_suggestor(v, v2, aud, aud2, ocr, ocr2)
+        options_informed_answer = mix_informed_answer.unsqueeze(2) * o2
+        options_informed_answer = options_informed_answer.sum(1)
+        #############################################
+        score_0 = options_informed_answer * o[:, 0, :]
+        score_0 = score_0.sum(1).unsqueeze(1)
+        score_1 = options_informed_answer * o[:, 1, :]
+        score_1 = score_1.sum(1).unsqueeze(1)
+        score_2 = options_informed_answer * o[:, 2, :]
+        score_2 = score_2.sum(1).unsqueeze(1)
+        if self.use_aux_loss > 0 and self.training:
+            # Hard-Mine N extra embeddings #
+            false_hard_mine = torch.randint(low=0, high=6369, size=(o.size()[0], self.use_aux_loss), device='cuda')
+            false_hard_embeddings = self.embedding_library(false_hard_mine)
+
+            # Attach them to the option_informed_answer #
+            fake_scores = options_informed_answer.repeat(1, self.use_aux_loss, 1) * false_hard_embeddings
+            fake_scores = fake_scores.sum(2)
+            scores = torch.cat([score_0, score_1, score_2, fake_scores], dim=1)
+
+        else:
+            scores = torch.cat([score_0, score_1, score_2], dim=1)
+        if gt_answer_int is not None:
+            loss = self.calc_loss(scores, gt_answer_int)
+            metric = self.calc_acc(scores[:, :3], gt_answer_int)
+            return scores, loss, metric
+        return scores, None, None
+
+
+class NoBrainEncoderBlockV4(nn.Module):
+    def __init__(self, skip_self=True, top_k=25):
         super().__init__()
         self.temp_vid = nn.Parameter(data=torch.zeros(1, device='cuda'), requires_grad=True)
         self.temp_aud = nn.Parameter(data=torch.zeros(1, device='cuda'), requires_grad=True)
         self.temp_ocr = nn.Parameter(data=torch.zeros(1, device='cuda'), requires_grad=True)
-        self.topk = TopKGroup(skip_self=skip_self, top_k=25)
+        self.topk = TopKGroup(skip_self=skip_self, top_k=top_k)
 
-    def forward(self, q1, k1, q2, k2, q3, k3, mask=None, **args):
-        vid_gate = torch.nn.functional.sigmoid(self.temp_vid)
-        aud_gate = torch.nn.functional.sigmoid(self.temp_aud)
-        ocr_gate = torch.nn.functional.sigmoid(self.temp_ocr)
+    def forward(self, q1, k1, q2, k2, q3=None, k3=None, mask=None, **args):
+        vid_gate = torch.nn.functional.sigmoid(self.temp_vid) * 2
+        aud_gate = torch.nn.functional.sigmoid(self.temp_aud) * 0
+        ocr_gate = torch.nn.functional.sigmoid(self.temp_ocr) * 0
 
         q1 = torch.nn.functional.normalize(q1, p=2, dim=-1)
         k1 = torch.nn.functional.normalize(k1, p=2, dim=-1)
         q2 = torch.nn.functional.normalize(q2, p=2, dim=-1)
         k2 = torch.nn.functional.normalize(k2, p=2, dim=-1)
-        q3 = torch.nn.functional.normalize(q3, p=2, dim=-1)
-        k3 = torch.nn.functional.normalize(k3, p=2, dim=-1)
+        ### Special Case for OCR ###
+        if not (q3 is None):
+            q3 = torch.nn.functional.normalize(q3, p=2, dim=-1)
+            k3 = torch.nn.functional.normalize(k3, p=2, dim=-1)
+            pass
 
         scores1 = torch.nn.functional.cosine_similarity(q1.unsqueeze(1), k1, dim=-1)
 
@@ -223,22 +355,30 @@ class NoBrainEncoderBlockV3(nn.Module):
             scores1 *= mask
         scores1 = torch.clip(scores1, 0, 1)
 
-
         scores2 = torch.nn.functional.cosine_similarity(q2.unsqueeze(1), k2, dim=-1)
         if mask is not None:
             scores2 *= mask
         scores2 = torch.clip(scores2, 0, 1)
 
-        scores3 = torch.nn.functional.cosine_similarity(q3.unsqueeze(1), k3, dim=-1)
+        ### Special Case for OCR ###
+        if not (q3 is None):
+            scores3 = torch.nn.functional.cosine_similarity(q3.unsqueeze(1), k3, dim=-1)
 
-        if mask is not None:
-            scores3 *= mask
-        scores3 = torch.clip(scores3, 0, 1)
+            if mask is not None:
+                scores3 *= mask
+            scores3 = torch.clip(scores3, 0, 1)
+            attention3 = F.softmax(scores3, dim=-1)
+            ocr_part = attention3 * ocr_gate
+        else:
+            scores3 = 0
+            attention3 = 0
+            ocr_part = 0
 
         attention1 = F.softmax(scores1, dim=-1)
+        vid_part = attention1 * vid_gate
         attention2 = F.softmax(scores2, dim=-1)
-        attention3 = F.softmax(scores3, dim=-1)
-        attention = attention1 * vid_gate + attention2 * aud_gate + attention3 * ocr_gate
+        aud_part = attention2 * aud_gate
+        attention = vid_part + aud_part + ocr_part
         attention = self.topk(attention)
         return attention
 
@@ -250,19 +390,8 @@ class TopKGroup(nn.Module):
         self.skip_self = skip_self
 
     def forward(self, score_vector, **args):
-        if not self.training:
-            skip_self = False
-            top_k = 1000
-        else:
-            if self.skip_self:
-                skip_self = True
-                if self.top_k == 1:
-                    top_k = 2
-                else:
-                    top_k = self.top_k
-            else:
-                skip_self = False
-                top_k = self.top_k
+        skip_self = self.skip_self
+        top_k = self.top_k
         _, top_k_indices = torch.topk(score_vector, k=min(top_k, score_vector.size()[-1]), dim=-1)
         self_top = score_vector.argmax(-1)
         top_k_indices = top_k_indices.squeeze(0)
@@ -407,17 +536,26 @@ class OCRVideoAudioMCVQA:
                  look_for_one_hot=True,
                  use_embedding=False,
                  common_dropout=0.25,
-                 use_aux_loss=0, *args):
+                 use_aux_loss=0, model_version=3, top_k=25, train_skip_self=False, *args):
+        self.top_k = top_k
         self.lfoh = look_for_one_hot
         self.use_embedding = use_embedding
         self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
-        self.model = MultiRetrievalAugmentedEmbeddingV3(use_embedding=use_embedding,
-                                                        common_dropout=common_dropout,
-                                                        use_aux_loss=use_aux_loss)
+        self.model_version = model_version
+        if self.model_version == 3:
+            self.model = MultiRetrievalAugmentedEmbeddingV3(use_embedding=use_embedding,
+                                                            common_dropout=common_dropout,
+                                                            use_aux_loss=use_aux_loss, top_k=top_k,
+                                                            train_skip_self=train_skip_self)
+        elif self.model_version == 4:
+            self.model = MultiRetrievalAugmentedEmbeddingV4(use_embedding=use_embedding,
+                                                            common_dropout=common_dropout,
+                                                            use_aux_loss=use_aux_loss, top_k=top_k,
+                                                            train_skip_self=train_skip_self)
         self.model.to(device='cuda')
         v = torch.zeros(1, 768).to('cuda')
         aud = torch.zeros(1, 768).to('cuda')
-        ocr = torch.zeros(1, 768).to('cuda')
+        ocr = torch.ones(1, 768).to('cuda')
         if self.use_embedding:
             o = torch.zeros(1, 3, dtype=torch.long).to('cuda')
             n_answ = torch.zeros(1, 25, dtype=torch.long).to('cuda')
@@ -426,9 +564,9 @@ class OCRVideoAudioMCVQA:
             n_answ = torch.zeros(1, 25, 6370).to('cuda')
         n_feats = torch.zeros(1, 25, 768).to('cuda')
         n_auds = torch.zeros(1, 25, 768).to('cuda')
-        n_ocrs = torch.zeros(1, 25, 768).to('cuda')
+        n_ocrs = torch.ones(1, 25, 768).to('cuda')
         pms.summary(self.model, v, n_feats, aud, n_auds, ocr, n_ocrs, o, n_answ, show_input=True, print_summary=True)
-        self._active_ds = copy.deepcopy(active_ds)
+        self._active_ds = copy.deepcopy(active_ds) if active_ds is not None else None
         if cache_ds is not None:
             self._cache_ds = self.build_video_answer_db_2(cache_ds)
         else:
@@ -557,7 +695,7 @@ class OCRVideoAudioMCVQA:
         save_checkpoint({
             'state_dict': self.model.state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, f'OCRAVQA_Model')
+        }, f'OCRAVQA_Model_{self.model_version}')
 
         # Freeze the video_model #
         self.model.eval()
@@ -668,7 +806,7 @@ class OCRVideoAudioMCVQA:
 
         _frames = frames.unsqueeze(0).to('cuda')
         _audio_frames = audio_frames.unsqueeze(0).to('cuda')
-        _ocr_frames = ocr_frames.unsqueeze(0).to('cuda')
+        _ocr_frames = ocr_frames.to('cuda')
         _db_frames = db_frames.unsqueeze(0).to('cuda')
         _audb_frames = audb_frames.unsqueeze(0).to('cuda')
         _ocrdb_frames = ocrdb_frames.unsqueeze(0).to('cuda')

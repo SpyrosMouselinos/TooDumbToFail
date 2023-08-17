@@ -1,16 +1,10 @@
-import argparse
-import torch
 import torch.nn as nn
 import torch.optim as optim
-
-import json
-import numpy as np
+from torch.utils.data import DataLoader
 
 from dataloader import *
 from nets.PSTP_Net_Ours import PSTP_Net
 from configs.arguments_PSTP_Net import parser
-
-
 import warnings
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
@@ -81,7 +75,7 @@ def main():
 
 
     # -------------> Computation costs
-    # from thop import profile
+    from thop import profile
     # from thop import clever_format
 
     # model = PSTP_Net(args)

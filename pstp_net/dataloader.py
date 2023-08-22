@@ -156,30 +156,21 @@ class AVQA_dataset(Dataset):
         name = sample['video_id']
         question_id = sample['question_id']
 
-        audios_feat = np.load(os.path.join(self.audios_feat_dir, name + '.npy'))
+        try:
+            audios_feat = np.load(os.path.join(self.audios_feat_dir, name + '.npy'))
+        except:
+            audios_feat = np.zeros(shape=(60, 128))
 
-        if self.args.question_encoder == "CLIP":
-            question_feat = np.load(os.path.join(self.clip_qst_dir, str(question_id) + '.npy'))
-        else:
-            question = sample['question_content']
-            question_feat = self.get_lstm_embeddings(question, sample)
+        visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_image_feats.npy'))
+        visual_feat = visual_CLIP_feat[:60, :]
 
-        if self.args.visual_encoder == "CLIP":
-            visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '.npy'))
-            visual_feat = visual_CLIP_feat[:60, 0, :]
-        elif self.args.visual_encoder == "Swin_V2_L":
-            visual_feat = np.load(os.path.join(self.visual_feat_dir, name + '.npy'))
 
-        if self.args.spatial_vis_encoder:
-            visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '.npy'))
-            patch_feat = visual_CLIP_feat[:60, 1:, :]
-        else:
-            patch_feat = np.zeros((1, 1), dtype=float)
+        visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_patch_feats.npy'))
+        patch_feat = visual_CLIP_feat[:60, :, :]
 
-        if self.args.use_word:
-            word_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '.npy'))
-        else:
-            word_feat = np.zeros((1, 1), dtype=float)
+        word_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_words.npy'))
+        question_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_sent.npy'))
+
 
         ### answer
         answer = sample['anser']
@@ -214,10 +205,10 @@ class ToTensor(object):
         question_id = sample['question_id']
 
         return {'video_name': video_name,
-                'audios_feat': torch.from_numpy(audios_feat),
-                'visual_feat': torch.from_numpy(visual_feat),
-                'patch_feat': torch.from_numpy(patch_feat),
-                'question': sample['question'],
-                'qst_word': sample['qst_word'],
+                'audios_feat': torch.from_numpy(audios_feat).float(),
+                'visual_feat': torch.from_numpy(visual_feat).float(),
+                'patch_feat': torch.from_numpy(patch_feat).float(),
+                'question': torch.from_numpy(question).float(),
+                'qst_word': torch.from_numpy(qst_word).float(),
                 'answer_label': answer_label,
                 'question_id': question_id}

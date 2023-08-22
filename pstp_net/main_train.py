@@ -20,10 +20,10 @@ def train(args, model, train_loader, optimizer, criterion, writer, epoch):
     model.train()
 
     for batch_idx, sample in enumerate(train_loader):
-        audios_feat, visual_feat, patch_feat, target, question, qst_word = sample['audios_feat'].to('cuda'), sample['visual_feat'], sample['patch_feat'], sample['answer_label'].to('cuda'), sample['question'].to('cuda'), sample['qst_word'].to('cuda')
+        audios_feat, visual_feat, patch_feat, target, question, qst_word = sample['audios_feat'].to('cuda'), sample['visual_feat'].to('cuda'), sample['patch_feat'].to('cuda'), sample['answer_label'].to('cuda'), sample['question'].to('cuda'), sample['qst_word'].to('cuda')
 
         optimizer.zero_grad()
-        output_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)  
+        output_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)
         loss = criterion(output_qa, target)
 
         writer.add_scalar('run/both', loss.item(), epoch * len(train_loader) + batch_idx)
@@ -70,7 +70,8 @@ def main():
     writer = SummaryWriter('runs/strn/' + TIMESTAMP + '_' + tensorboard_name)
 
     model = PSTP_Net(args)
-    model = nn.DataParallel(model).to('cuda')
+    model = model.to('cuda')
+    #model = nn.DataParallel(model).to('cuda')
 
 
 
@@ -97,24 +98,30 @@ def main():
 
     train_dataset = AVQA_dataset(label = args.label_train, 
                                  args = args, 
-                                 audios_feat_dir = args.audios_feat_dir, 
-                                 visual_feat_dir = args.visual_feat_dir,
-                                 clip_vit_b32_dir = args.clip_vit_b32_dir,
-                                 clip_qst_dir = args.clip_qst_dir, 
-                                 clip_word_dir = args.clip_word_dir, 
+                                 audios_feat_dir = args.audios_feat_dir, #Path to Audio feats
+                                 visual_feat_dir = None,
+                                 clip_vit_b32_dir = args.clip_vit_b32_dir, #Path to CLIP Video feats
+                                 clip_qst_dir = None,
+                                 clip_word_dir = args.clip_word_dir, #Path to CLIP Question feats
                                  transform = transforms.Compose([ToTensor()]), 
                                  mode_flag = 'train')
+    # Debug purposes #
+    args.num_workers = 0
+    args.batch_size = 4
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
     
     val_dataset = AVQA_dataset(label = args.label_val, 
                                args = args, 
                                audios_feat_dir = args.audios_feat_dir, 
-                               visual_feat_dir = args.visual_feat_dir,
+                               visual_feat_dir = None,
                                clip_vit_b32_dir = args.clip_vit_b32_dir,
-                               clip_qst_dir = args.clip_qst_dir,  
+                               clip_qst_dir = None,
                                clip_word_dir = args.clip_word_dir,  
                                transform = transforms.Compose([ToTensor()]), 
                                mode_flag = 'val')
+    # Debug purposes #
+    args.num_workers = 1
+
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
 

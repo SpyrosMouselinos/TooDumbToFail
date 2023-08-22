@@ -495,21 +495,17 @@ class PSTP_Net(nn.Module):
         super(PSTP_Net, self).__init__()
 
         self.args = args
-        self.num_layers = args.num_layers
+        self.num_layers = args.num_layers # Layers = 1
 
-        self.fc_a = nn.Linear(128, hidden_size)
-        self.fc_v = nn.Linear(512, hidden_size)
-        self.fc_p = nn.Linear(512, hidden_size)
-        self.fc_word = nn.Linear(512, hidden_size)
+        self.fc_a = nn.Linear(128, hidden_size) # 128 x 512
+        self.fc_v = nn.Linear(512, hidden_size) # 512 x 512
+        self.fc_p = nn.Linear(512, hidden_size) # 512 x 512
+        self.fc_word = nn.Linear(512, hidden_size) # 512 x 512
 
         self.relu = nn.ReLU()
 
-        if self.args.question_encoder == "CLIP":
-            self.fc_q = nn.Linear(512, hidden_size)
-        else:
-            self.fc_q = QstLstmEncoder(93, 512, 512, 1, 512)
-
-        self.fc_spat_q = nn.Linear(512, hidden_size)
+        self.fc_q = nn.Linear(512, hidden_size)  # 512 x 512
+        self.fc_spat_q = nn.Linear(512, hidden_size) # 512 x 512
 
         # modules
         self.TempSegsSelect_Module = TemporalSegmentSelection(args)
@@ -546,9 +542,7 @@ class PSTP_Net(nn.Module):
 
         audio_feat = self.fc_a(audio)  # [B, T, C]
         visual_feat = self.fc_v(visual)  # [B, T, C]
-
-        if self.args.use_word:
-            word_feat = self.fc_word(qst_word).squeeze(-3)  # [B, 77, C]
+        word_feat = self.fc_word(qst_word).squeeze(-3)  # [B, 77, C]
         qst_feat = self.fc_q(question).squeeze(-2)  # [B, C]
 
         if self.args.spat_select:

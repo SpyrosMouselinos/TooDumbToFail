@@ -35,10 +35,11 @@ def QstCLIP_feat(json_path, dst_qst_path):
         #print("\n")
         #print("question id: ", question_id)
 
-        save_file = os.path.join(dst_qst_path, str(question_id) + '.npy')
+        sent_file = os.path.join(dst_qst_path, str(question_id) + '_sent.npy')
+        words_file = os.path.join(dst_qst_path, str(question_id) + '_words.npy')
 
-        if os.path.exists(save_file):
-            #print(question_id, " is already exist!")
+        if os.path.exists(sent_file) and os.path.exists(words_file):
+            print(question_id, " already exists!")
             continue
 
         p = 0
@@ -53,12 +54,14 @@ def QstCLIP_feat(json_path, dst_qst_path):
         question = ' '.join(question)
         #print(question)
 
-        qst_feat = qst_feat_extract(question)
+        feats = qst_feat_extract(question)
         #print(qst_feat.shape)
 
-        qst_features = qst_feat.float().cpu().numpy()
+        sent_features = feats[0].float().cpu().numpy()
+        word_features = feats[1].float().cpu().numpy()
 
-        np.save(save_file, qst_features)
+        np.save(sent_file, sent_features)
+        np.save(words_file, word_features)
 
 
 

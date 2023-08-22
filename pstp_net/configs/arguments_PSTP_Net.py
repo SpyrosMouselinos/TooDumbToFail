@@ -7,22 +7,22 @@ parser = argparse.ArgumentParser(description='PyTorch Implementation of Audio-Vi
 
 ### ======================== Dataset Configs ==========================
 
-server_path = "/home/data/MUSIC-AVQA/"
+server_path = "/home/spyros/Desktop/TooDumbToFail/data/MUSIC-AVQA"
 
-parser.add_argument("--audios_feat_dir", type=str, default=os.path.join(server_path, 'vggish'), 
+parser.add_argument("--audios_feat_dir", type=str, default=os.path.join(server_path, 'vggish'),
                     help="audio feat dir")
-parser.add_argument("--visual_feat_dir", type=str, default=os.path.join(server_path, 'res18'), 
-                    help="visual feat dir")
-parser.add_argument("--clip_vit_b32_dir", type=str, default=os.path.join(server_path, 'clip_patch-level_vit_b32'), 
+# parser.add_argument("--visual_feat_dir", type=str, default=os.path.join(server_path, 'res18'),
+#                     help="visual feat dir")
+parser.add_argument("--clip_vit_b32_dir", type=str, default=os.path.join(server_path, 'clip_vit_b32'),
                     help="clip_vit-b32_dir")
-parser.add_argument("--clip_qst_dir", type=str, default=os.path.join(server_path, 'clip_qst'), 
-                    help="clip_qst")
+# parser.add_argument("--clip_qst_dir", type=str, default=os.path.join(server_path, 'clip_qst'),
+#                     help="clip_qst")
 parser.add_argument("--clip_word_dir", type=str, default=os.path.join(server_path, 'clip_word'), 
                     help="clip_word")
 parser.add_argument("--frames_dir", type=str, default=os.path.join(server_path, 'avqa-frames-1fps'), 
                     help="video frames dir")
-parser.add_argument("--video_res14x14_dir", type=str, default=os.path.join(server_path, 'visual_14x14'), 
-                    help="res14x14 dir")
+# parser.add_argument("--video_res14x14_dir", type=str, default=os.path.join(server_path, 'visual_14x14'),
+#                     help="res14x14 dir")
 
 
 ### ======================== Label Configs ==========================
@@ -101,5 +101,5 @@ parser.add_argument('--log-interval', type=int, default=50, metavar='N',
                     help='how many batches to wait before logging training status')
 parser.add_argument('--num_workers', type=int, default=12, 
                     help='num_workers number')
-parser.add_argument('--gpu', type=str, default='1', 
+parser.add_argument('--gpu', type=str, default='0',
                     help='gpu device number')

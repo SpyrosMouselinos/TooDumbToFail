@@ -4,29 +4,6 @@ import torch.nn.functional as F
 import copy
 
 
-class QstLstmEncoder(nn.Module):
-
-    def __init__(self, qst_vocab_size, word_embed_size, embed_size, num_layers, hidden_size):
-        super(QstLstmEncoder, self).__init__()
-        self.word2vec = nn.Embedding(qst_vocab_size, word_embed_size)
-        self.tanh = nn.Tanh()
-        self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers)
-        self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size)  # 2 for hidden and cell states
-
-    def forward(self, question):
-        qst_vec = self.word2vec(question)  # [batch_size, max_qst_length=30, word_embed_size=300]
-        qst_vec = self.tanh(qst_vec)
-        qst_vec = qst_vec.transpose(0, 1)  # [max_qst_length=30, batch_size, word_embed_size=300]
-        self.lstm.flatten_parameters()
-        _, (hidden, cell) = self.lstm(qst_vec)  # [num_layers=2, batch_size, hidden_size=512]
-        qst_feature = torch.cat((hidden, cell), 2)  # [num_layers=2, batch_size, 2*hidden_size=1024]
-        qst_feature = qst_feature.transpose(0, 1)  # [batch_size, num_layers=2, 2*hidden_size=1024]
-        qst_feature = qst_feature.reshape(qst_feature.size()[0], -1)  # [batch_size, 2*num_layers*hidden_size=2048]
-        qst_feature = self.tanh(qst_feature)
-        qst_feature = self.fc(qst_feature)  # [batch_size, embed_size]
-
-        return qst_feature
-
 
 class AVClipAttn(nn.Module):
 
@@ -377,62 +354,6 @@ class GlobalLocalPrecption(nn.Module):
         return audio_output, visual_output
 
 
-class AudioGuidedVisualAttn(nn.Module):
-
-    def __init__(self, args, hidden_size=512):
-        super(AudioGuidedVisualAttn, self).__init__()
-
-        self.args = args
-        self.attn_audio_query = nn.MultiheadAttention(hidden_size, 4, dropout=0.1)
-        self.audio_query_linear1 = nn.Linear(hidden_size, hidden_size)
-        self.audio_query_relu = nn.ReLU()
-        self.audio_query_dropout1 = nn.Dropout(0.1)
-        self.audio_query_linear2 = nn.Linear(hidden_size, hidden_size)
-        self.audio_query_dropout2 = nn.Dropout(0.1)
-        self.audio_query_visual_norm = nn.LayerNorm(hidden_size)
-
-    def AudioQuereidAttn(self, audio_feat, visual_feat):
-        audio_feat = audio_feat.unsqueeze(0)  # [1, B, C]
-        visual_feat = visual_feat.permute(1, 0, 2)  # [N, B, C]
-
-        a_guided_v_attn, patch_weights = self.attn_audio_query(audio_feat, visual_feat, visual_feat,
-                                                               attn_mask=None, key_padding_mask=None)
-        a_guided_v_attn = a_guided_v_attn.squeeze(0)
-        src = self.audio_query_linear1(a_guided_v_attn)
-        src = self.audio_query_relu(src)
-        src = self.audio_query_dropout1(src)
-        src = self.audio_query_linear2(src)
-        src = self.audio_query_dropout2(src)
-
-        a_guided_v_attn = a_guided_v_attn + src
-        a_guided_v_attn = self.audio_query_visual_norm(a_guided_v_attn)
-
-        return a_guided_v_attn, patch_weights
-
-    def forward(self, audio_top_k, visual_patch_feat):
-        B, T, N, C = visual_patch_feat.size()
-
-        audio_feat = audio_top_k  # [B, T, C]
-        visual_feat = visual_patch_feat  # [B, T, N, C]
-
-        # compute similarity score over one sec audio with its frame patchs
-        a_guided_attn = torch.zeros(B, T, C).cuda()
-        a_guided_patch_weights = torch.zeros(B, T, N).cuda()
-
-        for frame_idx in range(T):
-            a_feat_idx = audio_feat[:, frame_idx, :]  # [B, C]
-            v_feat_idx = visual_feat[:, frame_idx, :, :]  # [B, N, C]
-
-            # output: [B, C], [B, 1, N]
-            v_idx_attn, v_idx_weights = self.AudioQuereidAttn(a_feat_idx, v_feat_idx)
-
-            v_idx_attn = v_idx_attn.unsqueeze(-2)
-            a_guided_attn[:, frame_idx, :] = v_idx_attn[:, 0, :]
-            a_guided_patch_weights[:, frame_idx, :] = v_idx_weights[:, 0, :]
-
-        return a_guided_attn
-
-
 class GlobalHanLayer(nn.Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=512, dropout=0.1):
@@ -453,13 +374,11 @@ class GlobalHanLayer(nn.Module):
 
         self.activation = nn.ReLU()
 
-    def forward(self, src_q, src_v, src_mask=None, src_key_padding_mask=None):
+    def forward(self, src_q, src_mask=None, src_key_padding_mask=None):
         src_q = src_q.permute(1, 0, 2)
-        src_v = src_v.permute(1, 0, 2)
         src2 = self.self_attn(src_q, src_q, src_q, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
         src_q = src_q + self.dropout12(src2)
         src_q = self.norm1(src_q)
-
         src2 = self.linear2(self.dropout(F.relu(self.linear1(src_q))))
         src_q = src_q + self.dropout2(src2)
         src_q = self.norm2(src_q)
@@ -481,7 +400,7 @@ class GlobalSelfAttn(nn.Module):
         visual_output = src_v
 
         for i in range(self.num_layers):
-            visual_output = self.layers[i](src_v, src_v, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+            visual_output = self.layers[i](src_v, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
 
         if self.norm:
             visual_output = self.norm2(visual_output)
@@ -499,7 +418,7 @@ class PSTP_Net(nn.Module):
 
         self.fc_a = nn.Linear(128, hidden_size) # 128 x 512
         self.fc_v = nn.Linear(512, hidden_size) # 512 x 512
-        self.fc_p = nn.Linear(512, hidden_size) # 512 x 512
+        self.fc_p = nn.Linear(768, hidden_size) # 512 x 512
         self.fc_word = nn.Linear(512, hidden_size) # 512 x 512
 
         self.relu = nn.ReLU()
@@ -510,7 +429,7 @@ class PSTP_Net(nn.Module):
         # modules
         self.TempSegsSelect_Module = TemporalSegmentSelection(args)
         self.SpatRegsSelect_Module = SpatioRegionSelection(args)
-        self.AudioGuidedVisualAttn = AudioGuidedVisualAttn(args)
+
 
         self.GlobalLocal_Module = GlobalLocalPrecption(args,
                                                        AVHanLayer(d_model=512, nhead=1, dim_feedforward=512),
@@ -539,62 +458,37 @@ class PSTP_Net(nn.Module):
         # visual: [B, T, C]
         # question: [B, C]
         # patch: [B, T, N, C], N: patch numbers
-
         audio_feat = self.fc_a(audio)  # [B, T, C]
         visual_feat = self.fc_v(visual)  # [B, T, C]
         word_feat = self.fc_word(qst_word).squeeze(-3)  # [B, 77, C]
         qst_feat = self.fc_q(question).squeeze(-2)  # [B, C]
-
-        if self.args.spat_select:
-            patch_feat = self.fc_p(patch)  # [B, T, N, C], N: patch numbers
-            patch_feat_input = patch_feat  # [B, T, N, C]
-
-        audio_feat_input = audio_feat  # [B, T, C]
-        visual_feat_input = visual_feat  # [B, T, C]
-
-        audio_feat_mean = audio_feat.mean(dim=-2).squeeze(-2)  # [B, C]
-        visual_feat_mean = visual_feat.mean(dim=-2).squeeze(-2)  # [B, C]
+        patch_feat = self.fc_p(patch)  # [B, T, N, C], N: patch numbers
 
         ### 2. Temporal segment selection module *******************************************************
-        if self.args.temp_select:
-            # audio and visual output: [B, top_k * T/segs, C], eg: [B, 2*5, C]
-            # top_k_index_sort: selected top_k index
-            audio_feat_tm, visual_feat_tm, top_k_index_sort = self.TempSegsSelect_Module(audio_feat, visual_feat,
-                                                                                         qst_feat)
+        # audio and visual output: [B, top_k * T/segs, C], eg: [B, 2*5, C]
+        # top_k_index_sort: selected top_k index
+        audio_feat_tm, visual_feat_tm, top_k_index_sort = self.TempSegsSelect_Module(audio_feat, visual_feat,
+                                                                                     qst_feat)
 
         ### 3. Spatial regions selection module ********************************************************
-        if self.args.spat_select:
-            # audio_top_k: [B, top_k * T/segs, C]
-            # visual_patch_feat: [B, top_k * T/segs, C]
-            # visual_patch_feat_sm: [B, top_k * T/segs * select_patch_numbers, C]
-            audio_top_k, visual_patch_feat_sm, visual_patch_feat = self.SpatRegsSelect_Module(audio_feat, patch_feat,
-                                                                                              qst_feat,
-                                                                                              top_k_index_sort)
-
-        ##  3.2 Audio-guided visual attention
-        if self.args.a_guided_attn:
-            # output: [B, T, C]
-            a_guided_visual_feat = self.AudioGuidedVisualAttn(audio_top_k, visual_patch_feat_sm)
-
+        # audio_top_k: [B, top_k * T/segs, C]
+        # visual_patch_feat: [B, top_k * T/segs, C]
+        # visual_patch_feat_sm: [B, top_k * T/segs * select_patch_numbers, C]
+        audio_top_k, visual_patch_feat_sm, visual_patch_feat = self.SpatRegsSelect_Module(audio_feat,
+                                                                                          patch_feat,
+                                                                                          qst_feat,
+                                                                                          top_k_index_sort)
         ### 4. Global-local perception module **********************************************************
-        if self.args.global_local:
-            audio_feat_gl, visual_feat_gl = self.GlobalLocal_Module(audio_feat, visual_feat)
+        audio_feat_gl, visual_feat_gl = self.GlobalLocal_Module(audio_feat, visual_feat)
 
         ### 6. Fusion module **************************************************************************
-
-        # -------> Concat with T-dim
         visual_feat_fusion = torch.cat((visual_feat_tm, visual_patch_feat), dim=1)
-        visual_feat_fusion = torch.cat((visual_feat_fusion, a_guided_visual_feat), dim=1)
         visual_feat_fusion = torch.cat((visual_feat_fusion, visual_feat_gl), dim=1)
-        visual_feat_fusion = torch.cat((visual_feat_fusion, visual_feat_input), dim=1)
-
         audio_feat_fusion = torch.cat((audio_feat_tm, audio_feat_gl), dim=1)
-        audio_feat_fusion = torch.cat((audio_feat_fusion, audio_feat_input), dim=1)
 
-        # fusion_feat = torch.cat((audio_feat_fusion, visual_feat_fusion, word_feat), dim=1)
-        fusion_feat = torch.cat((audio_feat, visual_feat, word_feat), dim=1)
+        fusion_feat = torch.cat((audio_feat_fusion, visual_feat_fusion, word_feat), dim=1)
+
         av_fusion_feat = self.GlobalSelf_Module(fusion_feat)
-
         av_fusion_feat = av_fusion_feat.mean(dim=-2)
 
         avq_feat = torch.mul(av_fusion_feat, qst_feat)  # [batch_size, embed_size]

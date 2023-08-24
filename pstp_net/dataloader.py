@@ -1,76 +1,22 @@
+import pickle
 import numpy as np
 import torch
 import os
 from torch.utils.data import Dataset
-from torchvision import transforms
 import ast
 import json
-from PIL import Image
-
-
-def TransformImage(img):
-    transform_list = []
-    mean = [0.43216, 0.394666, 0.37645]
-    std = [0.22803, 0.22145, 0.216989]
-
-    transform_list.append(transforms.Resize([256, 256]))
-    transform_list.append(transforms.ToTensor())
-    transform_list.append(transforms.Normalize(mean, std))
-    trans = transforms.Compose(transform_list)
-    frame_tensor = trans(img)
-
-    return frame_tensor
-
-
-def TransformImage_Resize(img):
-    transform_list = []
-    mean = [0.43216, 0.394666, 0.37645]
-    std = [0.22803, 0.22145, 0.216989]
-
-    transform_list.append(transforms.Resize([256, 256]))
-    # transform_list.append(transforms.ToTensor())
-    # transform_list.append(transforms.Normalize(mean, std))
-    trans = transforms.Compose(transform_list)
-    frame_org = trans(img)
-
-    return frame_org
-
-
-def load_frame_info(img_path):
-    img = Image.open(img_path).convert('RGB')
-    # img2 = TransformImage_Resize(img)   # visualization
-    frame_tensor = TransformImage(img)
-
-    # return img2, frame_tensor    # visualization
-    return frame_tensor
-
-
-def image_info(frame_path):
-    img_list = os.listdir(frame_path)
-    img_list.sort()
-
-    select_img = []
-
-    for frame_idx in range(len(img_list)):
-        if frame_idx < 60:
-            video_frames_path = os.path.join(frame_path, str(frame_idx + 1).zfill(6) + ".jpg")
-            frame_tensor_info = load_frame_info(video_frames_path)
-            select_img.append(frame_tensor_info.cpu().numpy())
-
-    select_img = np.array(select_img)
-
-    # return org_img, select_img
-    return select_img
 
 
 def ids_to_multinomial(id, categories):
-    """ label encoding
-    Returns:
-      1d array, multimonial representation, e.g. [1,0,1,0,0,...]
-    """
     id_to_idx = {id: index for index, id in enumerate(categories)}
-
     return id_to_idx[id]
+
+
+def pickle_load(path):
+    with open(path, 'rb') as fin:
+        data = pickle.load(fin)
+
+    return data
 
 
 class AVQA_dataset(Dataset):
@@ -123,33 +69,6 @@ class AVQA_dataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def get_lstm_embeddings(self, question_input, sample):
-
-        question = sample['question_content'].rstrip().split(' ')
-        question[-1] = question[-1][:-1]
-
-        p = 0
-        for pos in range(len(question)):
-            if '<' in question[pos]:
-                question[pos] = ast.literal_eval(sample['templ_values'])[p]
-                p += 1
-        if len(question) < self.max_len:
-            n = self.max_len - len(question)
-            for i in range(n):
-                question.append('<pad>')
-
-        idxs = [self.word_to_ix[w] for w in question]
-        ques = torch.tensor(idxs, dtype=torch.long)
-
-        return ques
-
-    def get_frames_spatial(self, video_name):
-
-        frames_path = os.path.join(self.frames_dir, video_name)
-        frames_spatial = image_info(frames_path)  # [T, 3, 224, 224]
-
-        return frames_spatial
-
     def __getitem__(self, idx):
 
         sample = self.samples[idx]
@@ -185,6 +104,104 @@ class AVQA_dataset(Dataset):
 
         sample = {'video_name': name,
                   'audios_feat': audios_feat,
+                  'visual_feat': visual_feat,
+                  'patch_feat': patch_feat,
+                  'question': question_feat,
+                  'qst_word': word_feat,
+                  'answer_label': answer_label,
+                  'question_id': question_id}
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+
+class PerceptionAVQA_dataset(Dataset):
+    def __init__(self, args, label, audios_feat_dir, visual_feat_dir,
+                 clip_vit_b32_dir, clip_qst_dir, clip_word_dir,
+                 transform=None, mode_flag='train'):
+
+        self.args = args
+        samples = json.load(open(f'./dataset/split_que_id/perception_{mode_flag}.json', 'r'))
+
+        # Question
+        ques_vocab = ['<pad>']
+        ans_vocab = []
+        i = 0
+        for sample in samples:
+            i += 1
+            question = sample['question_content'].rstrip().split(' ')
+            question[-1] = question[-1][:-1]
+
+            p = 0
+            for pos in range(len(question)):
+                if '<' in question[pos]:
+                    question[pos] = ast.literal_eval(sample['templ_values'])[p]
+                    p += 1
+            for wd in question:
+                if wd not in ques_vocab:
+                    ques_vocab.append(wd)
+            if sample['anser'] not in ans_vocab:
+                ans_vocab.append(sample['anser'])
+
+        self.ques_vocab = ques_vocab
+        self.ans_vocab = ans_vocab
+        self.word_to_ix = {word: i for i, word in enumerate(self.ques_vocab)}
+
+        self.samples = json.load(open(label, 'r'))
+        self.max_len = 195  # question length
+
+        self.audios_feat_dir = audios_feat_dir
+        self.visual_feat_dir = visual_feat_dir
+
+        self.clip_vit_b32_dir = clip_vit_b32_dir
+        self.clip_qst_dir = clip_qst_dir
+        self.clip_word_dir = clip_word_dir
+
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+
+        sample = self.samples[idx]
+        name = sample['video_id']
+        question_id = sample['question_id']
+
+
+        audios_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_audioseg_1.pkl'))
+        ocr_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_ocrseg_1.pkl'))
+        video_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_seg_1.pkl'))
+
+
+        visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_image_feats.npy'))
+        needs_pad = visual_CLIP_feat.shape[0]
+        if 60 - needs_pad > 0:
+            visual_feat = np.pad(visual_CLIP_feat[:60, :], ((60 - needs_pad, 0), (0, 0)))
+        else:
+            visual_feat = visual_CLIP_feat[:60, :]
+
+        visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_patch_feats.npy'))
+        needs_pad = visual_CLIP_feat.shape[0]
+        if 60 - needs_pad > 0:
+            patch_feat = np.pad(visual_CLIP_feat[:60, :, :], ((60 - needs_pad, 0), (0, 0), (0, 0)))
+        else:
+            patch_feat = visual_CLIP_feat[:60, :, :]
+
+        word_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_words.npy'))
+        question_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_sent.npy'))
+
+        ### answer
+        answer = sample['anser']
+        answer_label = ids_to_multinomial(answer, self.ans_vocab)
+        answer_label = torch.from_numpy(np.array(answer_label)).long()
+
+        sample = {'video_name': name,
+                  'audios_feat': audios_feat,
+                  'ocr_feat': ocr_feat,
+                  'video_feat': video_feat,
                   'visual_feat': visual_feat,
                   'patch_feat': patch_feat,
                   'question': question_feat,

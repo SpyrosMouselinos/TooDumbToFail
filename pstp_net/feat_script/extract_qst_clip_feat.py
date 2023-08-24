@@ -20,7 +20,7 @@ def qst_feat_extract(qst):
 
 
 def QstCLIP_feat(json_path, dst_qst_path):
-
+    ids = []
     samples = json.load(open(json_path, 'r'))
 
     ques_vocab = ['<pad>']
@@ -32,6 +32,7 @@ def QstCLIP_feat(json_path, dst_qst_path):
         question[-1] = question[-1][:-1]
 
         question_id = sample['question_id']
+        ids.append(question_id)
         #print("\n")
         #print("question id: ", question_id)
 
@@ -65,9 +66,10 @@ def QstCLIP_feat(json_path, dst_qst_path):
 
 
 
+
 if __name__ == "__main__":
 
-    json_path = "../dataset/split_que_id/music_avqa.json"
+    json_path = "../dataset/split_que_id/perception.json"
     dst_qst_path = "../../data/PERCEPTION/clip_word/"
 
     QstCLIP_feat(json_path, dst_qst_path)

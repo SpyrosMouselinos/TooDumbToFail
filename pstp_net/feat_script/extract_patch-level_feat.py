@@ -58,7 +58,7 @@ def ImageClIP_feat_extract(dir_fps_path, dst_clip_path):
 
 
 if __name__ == "__main__":
-    dir_fps_path = '../../data/MUSIC-AVQA/avqa-frames-1fps'
-    dst_clip_path = '../../data/MUSIC-AVQA/clip_vit_b32'
+    dir_fps_path = '../../data/PERCEPTION/avqa-frames-1fps'
+    dst_clip_path = '../../data/PERCEPTION/clip_vit_b32'
 
     ImageClIP_feat_extract(dir_fps_path, dst_clip_path)

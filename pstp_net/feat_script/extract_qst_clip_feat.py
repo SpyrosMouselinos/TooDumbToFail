@@ -68,7 +68,7 @@ def QstCLIP_feat(json_path, dst_qst_path):
 if __name__ == "__main__":
 
     json_path = "../dataset/split_que_id/music_avqa.json"
-    dst_qst_path = "../../data/MUSIC-AVQA/clip_word/"
+    dst_qst_path = "../../data/PERCEPTION/clip_word/"
 
     QstCLIP_feat(json_path, dst_qst_path)
 

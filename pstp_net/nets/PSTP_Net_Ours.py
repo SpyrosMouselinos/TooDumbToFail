@@ -415,16 +415,12 @@ class PSTP_Net(nn.Module):
 
         self.args = args
         self.num_layers = args.num_layers # Layers = 1
-
         self.fc_a = nn.Linear(128, hidden_size) # 128 x 512
         self.fc_v = nn.Linear(512, hidden_size) # 512 x 512
         self.fc_p = nn.Linear(768, hidden_size) # 512 x 512
         self.fc_word = nn.Linear(512, hidden_size) # 512 x 512
-
-        self.relu = nn.ReLU()
-
         self.fc_q = nn.Linear(512, hidden_size)  # 512 x 512
-        self.fc_spat_q = nn.Linear(512, hidden_size) # 512 x 512
+        self.relu = nn.ReLU()
 
         # modules
         self.TempSegsSelect_Module = TemporalSegmentSelection(args)
@@ -438,17 +434,7 @@ class PSTP_Net(nn.Module):
                                                 GlobalHanLayer(d_model=512, nhead=1, dim_feedforward=512),
                                                 num_layers=self.num_layers)
 
-        # fusion with audio and visual feat
-        self.audio_fusion = nn.Linear(512, 512)
-        self.visual_fusion = nn.Linear(512, 512)
-
-        self.SM_fusion = nn.Linear(1024, 512)
-
-        self.tanh_av_fusion = nn.Tanh()
-        self.fc_av_fusion = nn.Linear(1024, 512)
-        self.tanh_avq_fusion = nn.Tanh()
-
-        # answer prediction
+        self.tanh = nn.Tanh()
         self.fc_answer_pred = nn.Linear(512, 42)
 
     def forward(self, audio, visual, patch, question, qst_word):
@@ -482,8 +468,8 @@ class PSTP_Net(nn.Module):
         audio_feat_gl, visual_feat_gl = self.GlobalLocal_Module(audio_feat, visual_feat)
 
         ### 6. Fusion module **************************************************************************
-        visual_feat_fusion = torch.cat((visual_feat_tm, visual_patch_feat), dim=1)
-        visual_feat_fusion = torch.cat((visual_feat_fusion, visual_feat_gl), dim=1)
+        #visual_feat_fusion = torch.cat((visual_feat_tm, visual_patch_feat), dim=1)
+        visual_feat_fusion = torch.cat((visual_patch_feat, visual_feat_gl), dim=1)
         audio_feat_fusion = torch.cat((audio_feat_tm, audio_feat_gl), dim=1)
 
         fusion_feat = torch.cat((audio_feat_fusion, visual_feat_fusion, word_feat), dim=1)
@@ -492,7 +478,7 @@ class PSTP_Net(nn.Module):
         av_fusion_feat = av_fusion_feat.mean(dim=-2)
 
         avq_feat = torch.mul(av_fusion_feat, qst_feat)  # [batch_size, embed_size]
-        avq_feat = self.tanh_avq_fusion(avq_feat)
+        avq_feat = self.tanh(avq_feat)
 
         ### 7. Answer prediction moudule *************************************************************
         answer_pred = self.fc_answer_pred(avq_feat)  # [batch_size, ans_vocab_size=42]

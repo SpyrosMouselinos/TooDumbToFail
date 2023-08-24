@@ -95,6 +95,6 @@ def extract_frames_from_videos(source_folder):
 
 
 if __name__ == '__main__':
-    dir_fps_path = '../data/MUSIC-AVQA/avqa-frames-1fps'
+    dir_fps_path = '../data/PERCEPTION/avqa-frames-1fps'
     #organize_videos(dir_fps_path)
-    #extract_frames_from_videos(dir_fps_path)
+    extract_frames_from_videos(dir_fps_path)

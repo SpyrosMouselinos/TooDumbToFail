@@ -8,44 +8,54 @@ from configs.arguments_PSTP_Net import parser
 import warnings
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
-TIMESTAMP = "{0:%Y-%m-%d-%H-%M-%S/}".format(datetime.now()) 
-warnings.filterwarnings('ignore')
+from torch.cuda.amp import autocast, GradScaler
 
+TIMESTAMP = "{0:%Y-%m-%d-%H-%M-%S/}".format(datetime.now())
+warnings.filterwarnings('ignore')
 
 print("\n--------------- PSPT-Net Training --------------- \n")
 
 
-def train(args, model, train_loader, optimizer, criterion, writer, epoch):
-    
+def train(args, model, train_loader, optimizer, criterion, writer, epoch, scaler=None):
     model.train()
 
     for batch_idx, sample in enumerate(train_loader):
-        audios_feat, visual_feat, patch_feat, target, question, qst_word = sample['audios_feat'].to('cuda'), sample['visual_feat'].to('cuda'), sample['patch_feat'].to('cuda'), sample['answer_label'].to('cuda'), sample['question'].to('cuda'), sample['qst_word'].to('cuda')
+        audios_feat, visual_feat, patch_feat, target, question, qst_word = sample['audios_feat'].to('cuda'), sample[
+            'visual_feat'].to('cuda'), sample['patch_feat'].to('cuda'), sample['answer_label'].to('cuda'), sample[
+            'question'].to('cuda'), sample['qst_word'].to('cuda')
 
         optimizer.zero_grad()
-        output_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)
-        loss = criterion(output_qa, target)
+        if scaler is not None:
+            with autocast(dtype=torch.float16):
+                output_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)
+                loss = criterion(output_qa, target)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            output_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)
+            loss = criterion(output_qa, target)
+            loss.backward()
+            optimizer.step()
 
         writer.add_scalar('run/both', loss.item(), epoch * len(train_loader) + batch_idx)
 
-        loss.backward()
-        optimizer.step()
-
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                  epoch, batch_idx * len(audios_feat), len(train_loader.dataset),
-                  100. * batch_idx / len(train_loader), loss.item()))
+                epoch, batch_idx * len(audios_feat), len(train_loader.dataset),
+                       100. * batch_idx / len(train_loader), loss.item()))
 
 
 def eval(model, val_loader, writer, epoch):
-    
     model.eval()
     total_qa = 0
     correct_qa = 0
 
     with torch.no_grad():
         for batch_idx, sample in enumerate(val_loader):
-            audios_feat, visual_feat, patch_feat, target, question, qst_word = sample['audios_feat'].to('cuda'), sample['visual_feat'], sample['patch_feat'], sample['answer_label'].to('cuda'), sample['question'].to('cuda'), sample['qst_word'].to('cuda')
+            audios_feat, visual_feat, patch_feat, target, question, qst_word = sample['audios_feat'].to('cuda'), sample[
+                'visual_feat'], sample['patch_feat'], sample['answer_label'].to('cuda'), sample['question'].to('cuda'), \
+                sample['qst_word'].to('cuda')
 
             preds_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)
 
@@ -54,14 +64,12 @@ def eval(model, val_loader, writer, epoch):
             correct_qa += (predicted == target).sum().item()
 
     print('Current Acc: %.2f %%' % (100 * correct_qa / total_qa))
-    writer.add_scalar('metric/acc_qa',100 * correct_qa / total_qa, epoch)
+    writer.add_scalar('metric/acc_qa', 100 * correct_qa / total_qa, epoch)
 
     return 100 * correct_qa / total_qa
 
 
-
 def main():
-
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     torch.manual_seed(args.seed)
@@ -71,71 +79,68 @@ def main():
 
     model = PSTP_Net(args)
     model = model.to('cuda')
-    #model = nn.DataParallel(model).to('cuda')
-
-
+    # model = nn.DataParallel(model).to('cuda')
 
     # -------------> Computation costs
     from thop import profile
-    # from thop import clever_format
+    from thop import clever_format
 
-    # model = PSTP_Net(args)
-    # model = model.to('cuda')
+    model = PSTP_Net(args)
+    model = model.to('cuda')
+    input1 = torch.randn(1, 60, 128).to('cuda')
+    input2 = torch.randn(1, 60, 512).to('cuda')
+    input3 = torch.randn(1, 60, 50, 768).to('cuda')
+    input4 = torch.randn(1, 1, 512).to('cuda')
+    input5 = torch.randn(1, 1, 77, 512).to('cuda')
 
-    # input1 = torch.randn(1, 60, 128).to('cuda')
-    # input2 = torch.randn(1, 60, 512).to('cuda')
-    # input3 = torch.randn(1, 60, 50, 512).to('cuda')
-    # input4 = torch.randn(1, 1, 512).to('cuda')
-    # input5 = torch.randn(1, 77, 512).to('cuda')
-
-    # flops, params = profile(model, inputs=(input1, input2, input3, input4, input5))
-    # print("profile: ", flops, params)
-    # flops, params = clever_format([flops, params], "%.3f")
-    # print("clever: ", flops, params) 
+    flops, params = profile(model, inputs=(input1, input2, input3, input4, input5))
+    print("profile: ", flops, params)
+    flops, params = clever_format([flops, params], "%.3f")
+    print("clever: ", flops, params)
 
     # -------------> Computation costs end
 
+    train_dataset = AVQA_dataset(label=args.label_train,
+                                 args=args,
+                                 audios_feat_dir=args.audios_feat_dir,  # Path to Audio feats
+                                 visual_feat_dir=None,
+                                 clip_vit_b32_dir=args.clip_vit_b32_dir,  # Path to CLIP Video feats
+                                 clip_qst_dir=None,
+                                 clip_word_dir=args.clip_word_dir,  # Path to CLIP Question feats
+                                 transform=transforms.Compose([ToTensor()]),
+                                 mode_flag='train')
+    # Debug purposes #
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                              pin_memory=True)
 
-    train_dataset = AVQA_dataset(label = args.label_train, 
-                                 args = args, 
-                                 audios_feat_dir = args.audios_feat_dir, #Path to Audio feats
-                                 visual_feat_dir = None,
-                                 clip_vit_b32_dir = args.clip_vit_b32_dir, #Path to CLIP Video feats
-                                 clip_qst_dir = None,
-                                 clip_word_dir = args.clip_word_dir, #Path to CLIP Question feats
-                                 transform = transforms.Compose([ToTensor()]), 
-                                 mode_flag = 'train')
+    val_dataset = AVQA_dataset(label=args.label_val,
+                               args=args,
+                               audios_feat_dir=args.audios_feat_dir,
+                               visual_feat_dir=None,
+                               clip_vit_b32_dir=args.clip_vit_b32_dir,
+                               clip_qst_dir=None,
+                               clip_word_dir=args.clip_word_dir,
+                               transform=transforms.Compose([ToTensor()]),
+                               mode_flag='val')
     # Debug purposes #
     args.num_workers = 0
-    args.batch_size = 4
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
-    
-    val_dataset = AVQA_dataset(label = args.label_val, 
-                               args = args, 
-                               audios_feat_dir = args.audios_feat_dir, 
-                               visual_feat_dir = None,
-                               clip_vit_b32_dir = args.clip_vit_b32_dir,
-                               clip_qst_dir = None,
-                               clip_word_dir = args.clip_word_dir,  
-                               transform = transforms.Compose([ToTensor()]), 
-                               mode_flag = 'val')
-    # Debug purposes #
-    args.num_workers = 1
 
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True)
-
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.1)
     criterion = nn.CrossEntropyLoss()
-    
 
     best_acc = 0
     best_epoch = 0
+    if args.use_mixed:
+        scaler = GradScaler()
+    else:
+        scaler = None
     for epoch in range(1, args.epochs + 1):
 
         # train for one epoch
-        train(args, model, train_loader, optimizer, criterion, writer, epoch=epoch)
+        train(args, model, train_loader, optimizer, criterion, writer, epoch=epoch, scaler=scaler)
 
         # evaluate on validation set
         scheduler.step(epoch)
@@ -145,9 +150,9 @@ def main():
             best_epoch = epoch
             torch.save(model.state_dict(), args.model_save_dir + args.checkpoint + ".pt")
 
-        print("Best Acc: %.2f %%"%best_acc)
+        print("Best Acc: %.2f %%" % best_acc)
         print("Best Epoch: ", best_epoch)
-        print("*"*20)
+        print("*" * 20)
 
 
 if __name__ == '__main__':

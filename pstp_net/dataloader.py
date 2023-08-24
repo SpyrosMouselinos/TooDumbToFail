@@ -162,15 +162,21 @@ class AVQA_dataset(Dataset):
             audios_feat = np.zeros(shape=(60, 128))
 
         visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_image_feats.npy'))
-        visual_feat = visual_CLIP_feat[:60, :]
-
+        needs_pad = visual_CLIP_feat.shape[0]
+        if 60 - needs_pad > 0:
+            visual_feat = np.pad(visual_CLIP_feat[:60, :], ((60 - needs_pad, 0), (0, 0)))
+        else:
+            visual_feat = visual_CLIP_feat[:60, :]
 
         visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_patch_feats.npy'))
-        patch_feat = visual_CLIP_feat[:60, :, :]
+        needs_pad = visual_CLIP_feat.shape[0]
+        if 60 - needs_pad > 0:
+            patch_feat = np.pad(visual_CLIP_feat[:60, :, :], ((60 - needs_pad, 0), (0, 0), (0, 0)))
+        else:
+            patch_feat = visual_CLIP_feat[:60, :, :]
 
         word_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_words.npy'))
         question_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_sent.npy'))
-
 
         ### answer
         answer = sample['anser']

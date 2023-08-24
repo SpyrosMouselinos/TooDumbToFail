@@ -3,21 +3,21 @@ import json
 import os
 
 
-def transform_format(original_data):
+def transform_format(perception_data, global_idx):
     target_data = []
-    global_idx = 0
-    for video_id, video_info in original_data.items():
+    for video_id, video_info in perception_data.items():
         mc_questions = video_info["mc_question"]
-
+        metadata = video_info['metadata']
         for question in mc_questions:
             transformed_question = {
                 "question_id": global_idx,
                 "video_id": video_id,
                 "question_content": question["question"],
                 "templ_values": "[]",
-                "anser": question["options"][question["answer_id"]],
-                "answer_id": question["answer_id"],
-                "options": question["options"]
+                "anser": question["options"][question["answer_id"]] if 'answer_id' in question else None,
+                "answer_id": question["answer_id"] if 'answer_id' in question else None,
+                "options": question["options"],
+                "split": metadata['split']
             }
 
             target_data.append(transformed_question)
@@ -26,32 +26,23 @@ def transform_format(original_data):
     return target_data
 
 
-
-def process_json_files(input_folder, output_folder):
-    # Ensure output folder exists, create it if not
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-
-    # Process each JSON file in the input folder
-    for filename in os.listdir(input_folder):
-        if filename.endswith('.json'):
-            input_filepath = os.path.join(input_folder, filename)
-            output_filename = f"transformed_{filename}"
-            output_filepath = os.path.join(output_folder, output_filename)
-
-            with open(input_filepath, 'r') as input_file:
-                original_data = json.load(input_file)
-
-            target_data = transform_format(original_data)
-
-            with open(output_filepath, 'w') as output_file:
-                json.dump(target_data, output_file, indent=2)
-
-            print(f"Transformed '{filename}' and saved as '{output_filename}'.")
+def process_json_files(input_files, output_file):
+    # Process each JSON file
+    global_idx = 0
+    final_data = []
+    for file in input_files:
+        with open(file, 'r') as fin:
+            perception_data = json.load(fin)
+        for f in transform_format(perception_data, global_idx):
+            final_data.append(f)
+    # Massive output #
+    with open(output_file, 'w') as fout:
+        json.dump(fout, output_file)
 
 
 # Example usage
-input_folder = "/path/to/input/json/files"
-output_folder = "/path/to/output/json/files"
+if __name__ == '__main__':
+    input_files = ["../data/mc_question_train.json", "../data/mc_question_test.json", "../data/mc_question_valid.json"]
+    output_file = "./dataset/split_que_id/perception.json"
 
-process_json_files(input_folder, output_folder)
+    process_json_files(input_files, output_file)

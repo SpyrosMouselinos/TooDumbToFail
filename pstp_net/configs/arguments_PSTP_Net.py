@@ -97,9 +97,11 @@ parser.add_argument("--mode", type=str, default='train',
 
 
 ### ======================== Runtime Configs ==========================
-parser.add_argument('--log-interval', type=int, default=50, metavar='N', 
+parser.add_argument('--log-interval', type=int, default=1, metavar='N',
                     help='how many batches to wait before logging training status')
-parser.add_argument('--num_workers', type=int, default=12, 
+parser.add_argument('--num_workers', type=int, default=4,
                     help='num_workers number')
 parser.add_argument('--gpu', type=str, default='0',
                     help='gpu device number')
+parser.add_argument("--use_mixed", type=bool, default=True, metavar='use_mixed'
+                    )

@@ -20,6 +20,8 @@ parser.add_argument("--clip_vit_b32_dir", type=str, default=os.path.join(server_
                     help="clip_vit-b32_dir")
 parser.add_argument("--clip_word_dir", type=str, default=os.path.join(server_path, 'clip_word'),
                     help="clip_word")
+parser.add_argument("--clip_word_ans_dir", type=str, default=os.path.join(server_path, 'clip_word_ans'),
+                    help="clip_word")
 parser.add_argument("--frames_dir", type=str, default=os.path.join(server_path, 'avqa-frames-1fps'),
                     help="video frames dir")
 parser.add_argument("--ocr_rel_videos", type=str, default=os.path.join(base_path, 'ocr_rel_videos.json'),

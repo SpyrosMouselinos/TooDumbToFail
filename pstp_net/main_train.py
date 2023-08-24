@@ -1,10 +1,11 @@
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torchvision.transforms import transforms
 
 from dataloader import *
-from nets.PSTP_Net_Ours import PSTP_Net
-from configs.arguments_PSTP_Net import parser
+from nets.PSTP_Net_Cat import Cataphract
+from configs.arguments_PSTP_Cat import parser
 import warnings
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
@@ -13,10 +14,10 @@ from torch.cuda.amp import autocast, GradScaler
 TIMESTAMP = "{0:%Y-%m-%d-%H-%M-%S/}".format(datetime.now())
 warnings.filterwarnings('ignore')
 
-print("\n--------------- PSPT-Net Training --------------- \n")
+print("\n--------------- Cataphract Training --------------- \n")
 
 
-def train(args, model, train_loader, optimizer, criterion, writer, epoch, scaler=None):
+def train(args, model, train_loader, optimizer, writer, epoch, scaler=None):
     model.train()
 
     for batch_idx, sample in enumerate(train_loader):
@@ -27,14 +28,12 @@ def train(args, model, train_loader, optimizer, criterion, writer, epoch, scaler
         optimizer.zero_grad()
         if scaler is not None:
             with autocast(dtype=torch.float16):
-                output_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)
-                loss = criterion(output_qa, target)
+                output_qa, loss = model(audios_feat, visual_feat, patch_feat, question, qst_word)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            output_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)
-            loss = criterion(output_qa, target)
+            output_qa, loss = model(audios_feat, visual_feat, patch_feat, question, qst_word)
             loss.backward()
             optimizer.step()
 
@@ -57,7 +56,7 @@ def eval(model, val_loader, writer, epoch):
                 'visual_feat'], sample['patch_feat'], sample['answer_label'].to('cuda'), sample['question'].to('cuda'), \
                 sample['qst_word'].to('cuda')
 
-            preds_qa = model(audios_feat, visual_feat, patch_feat, question, qst_word)
+            preds_qa, _ = model(audios_feat, visual_feat, patch_feat, question, qst_word)
 
             _, predicted = torch.max(preds_qa.data, 1)
             total_qa += preds_qa.size(0)
@@ -77,15 +76,10 @@ def main():
     tensorboard_name = args.checkpoint
     writer = SummaryWriter('runs/strn/' + TIMESTAMP + '_' + tensorboard_name)
 
-    model = PSTP_Net(args)
-    model = model.to('cuda')
-    # model = nn.DataParallel(model).to('cuda')
-
-    # -------------> Computation costs
     from thop import profile
     from thop import clever_format
 
-    model = PSTP_Net(args)
+    model = Cataphract(args)
     model = model.to('cuda')
     input1 = torch.randn(1, 60, 128).to('cuda')
     input2 = torch.randn(1, 60, 512).to('cuda')
@@ -100,36 +94,41 @@ def main():
 
     # -------------> Computation costs end
 
-    train_dataset = AVQA_dataset(label=args.label_train,
+    train_dataset = PerceptionAVQA_dataset(label=args.label_train,
                                  args=args,
                                  audios_feat_dir=args.audios_feat_dir,  # Path to Audio feats
                                  visual_feat_dir=None,
+                                 video_dir=args.video_feat_dir,
+                                 ocr_dir=args.ocr_feat_dir,
                                  clip_vit_b32_dir=args.clip_vit_b32_dir,  # Path to CLIP Video feats
                                  clip_qst_dir=None,
                                  clip_word_dir=args.clip_word_dir,  # Path to CLIP Question feats
+                                 clip_word_ans_dir=args.clip_word_ans_dir,  # Path to CLIP Answer feats
                                  transform=transforms.Compose([ToTensor()]),
                                  mode_flag='train')
-    # Debug purposes #
+
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                               pin_memory=True)
 
-    val_dataset = AVQA_dataset(label=args.label_val,
-                               args=args,
-                               audios_feat_dir=args.audios_feat_dir,
-                               visual_feat_dir=None,
-                               clip_vit_b32_dir=args.clip_vit_b32_dir,
-                               clip_qst_dir=None,
-                               clip_word_dir=args.clip_word_dir,
-                               transform=transforms.Compose([ToTensor()]),
-                               mode_flag='val')
-    # Debug purposes #
-    args.num_workers = 0
+    val_dataset = PerceptionAVQA_dataset(label=args.label_val,
+                                         args=args,
+                                         audios_feat_dir=args.audios_feat_dir,  # Path to Audio feats
+                                         visual_feat_dir=None,
+                                         video_dir=args.video_feat_dir,
+                                         ocr_dir=args.ocr_feat_dir,
+                                         clip_vit_b32_dir=args.clip_vit_b32_dir,  # Path to CLIP Video feats
+                                         clip_qst_dir=None,
+                                         clip_word_dir=args.clip_word_dir,  # Path to CLIP Question feats
+                                         clip_word_ans_dir=args.clip_word_ans_dir,  # Path to CLIP Answer feats
+                                         transform=transforms.Compose([ToTensor()]),
+                                         mode_flag='val')
 
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.1)
-    criterion = nn.CrossEntropyLoss()
+
 
     best_acc = 0
     best_epoch = 0
@@ -140,7 +139,7 @@ def main():
     for epoch in range(1, args.epochs + 1):
 
         # train for one epoch
-        train(args, model, train_loader, optimizer, criterion, writer, epoch=epoch, scaler=scaler)
+        train(args, model, train_loader, optimizer, writer, epoch=epoch, scaler=scaler)
 
         # evaluate on validation set
         scheduler.step(epoch)

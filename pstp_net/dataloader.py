@@ -118,8 +118,8 @@ class AVQA_dataset(Dataset):
 
 
 class PerceptionAVQA_dataset(Dataset):
-    def __init__(self, args, label, audios_feat_dir, visual_feat_dir,
-                 clip_vit_b32_dir, clip_qst_dir, clip_word_dir,
+    def __init__(self, args, label, audios_feat_dir, visual_feat_dir, video_dir, ocr_dir,
+                 clip_vit_b32_dir, clip_qst_dir, clip_word_dir, clip_word_ans_dir,
                  transform=None, mode_flag='train'):
 
         self.args = args
@@ -154,10 +154,13 @@ class PerceptionAVQA_dataset(Dataset):
 
         self.audios_feat_dir = audios_feat_dir
         self.visual_feat_dir = visual_feat_dir
+        self.video_feat_dir = video_dir
+        self.ocr_feat_dir = ocr_dir
 
         self.clip_vit_b32_dir = clip_vit_b32_dir
         self.clip_qst_dir = clip_qst_dir
         self.clip_word_dir = clip_word_dir
+        self.clip_word_ans_dir = clip_word_ans_dir
 
         self.transform = transform
 
@@ -170,11 +173,9 @@ class PerceptionAVQA_dataset(Dataset):
         name = sample['video_id']
         question_id = sample['question_id']
 
-
         audios_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_audioseg_1.pkl'))
-        ocr_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_ocrseg_1.pkl'))
-        video_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_seg_1.pkl'))
-
+        ocr_feat = pickle_load(os.path.join(self.ocr_feat_dir, name + '_ocrseg_1.pkl'))
+        video_feat = pickle_load(os.path.join(self.video_feat_dir, name + '_seg_1.pkl'))
 
         visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_image_feats.npy'))
         needs_pad = visual_CLIP_feat.shape[0]
@@ -192,11 +193,18 @@ class PerceptionAVQA_dataset(Dataset):
 
         word_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_words.npy'))
         question_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_sent.npy'))
+        options_feat = np.load(os.path.join(self.clip_word_ans_dir, str(question_id) + '_sent.npy'))
 
-        ### answer
-        answer = sample['anser']
-        answer_label = ids_to_multinomial(answer, self.ans_vocab)
-        answer_label = torch.from_numpy(np.array(answer_label)).long()
+        ### Answer
+        if sample['anser'] == sample['options'][0]:
+            answer_feat = options_feat[0, :, :]
+        elif sample['anser'] == sample['options'][1]:
+            answer_feat = options_feat[1,:,:]
+        elif sample['anser'] == sample['options'][2]:
+            answer_feat = options_feat[2, :, :]
+        else:
+            raise ValueError(f"Answer {sample['anser']} not in {sample['options']}")
+
 
         sample = {'video_name': name,
                   'audios_feat': audios_feat,
@@ -206,7 +214,8 @@ class PerceptionAVQA_dataset(Dataset):
                   'patch_feat': patch_feat,
                   'question': question_feat,
                   'qst_word': word_feat,
-                  'answer_label': answer_label,
+                  'options_feat': options_feat,
+                  'answer_feat': answer_feat,
                   'question_id': question_id}
 
         if self.transform:

@@ -69,29 +69,31 @@ parser.add_argument("--num_layers", type=int, default=1, metavar='num_layers',
 
 
 ### ======================== Learning Configs ==========================
-parser.add_argument('--batch-size', type=int, default=6, metavar='N',
+parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                     help='input batch size for training (default: 8)')
 parser.add_argument('--epochs', type=int, default=30, metavar='E',
                     help='number of epochs to train (default: 20)')
-parser.add_argument('--lr', type=float, default=1e-4, metavar='LR',
+parser.add_argument('--lr', type=float, default=3e-4, metavar='LR',
                     help='learning rate (default: 3e-4)')
+parser.add_argument('--eval_every', type=int, default=2, metavar='eval_every',
+                    help='eval every epochs')
 parser.add_argument('--seed', type=int, default=1, metavar='S',
                     help='random seed (default: 1)')
 
 
 ### ======================== Save Configs ==========================
-parser.add_argument( "--checkpoint", type=str, default='PSTP_Cat',
+parser.add_argument( "--checkpoint", type=str, default='PSTP_Cat_swapped_datasets',
                     help="save model name")
-parser.add_argument("--model_save_dir", type=str, default='models_pstp_cat/',
+parser.add_argument("--model_save_dir", type=str, default='/home/spyros/Desktop/TooDumbToFail/pstp_net/runs/models_pstp_cat/',
                     help="model save dir")
 parser.add_argument("--mode", type=str, default='train',
                     help="with mode to use")
 
 
 ### ======================== Runtime Configs ==========================
-parser.add_argument('--log-interval', type=int, default=1, metavar='N',
+parser.add_argument('--log-interval', type=int, default=5, metavar='N',
                     help='how many batches to wait before logging training status')
-parser.add_argument('--num_workers', type=int, default=0,
+parser.add_argument('--num_workers', type=int, default=8,
                     help='num_workers number')
 parser.add_argument('--gpu', type=str, default='0',
                     help='gpu device number')

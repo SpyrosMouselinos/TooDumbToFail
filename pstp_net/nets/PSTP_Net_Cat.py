@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
-
+from torchmetrics.classification import MulticlassAccuracy
 
 
 class AVClipAttn(nn.Module):
@@ -408,13 +408,65 @@ class GlobalSelfAttn(nn.Module):
         return visual_output
 
 
+class EmbSimHead(nn.Module):
+    def __init__(self):
+        super(EmbSimHead, self).__init__()
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
+
+    def calc_loss(self, scores, gt):
+        """
+        Calculate Cross-Entropy Loss
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+
+        return self.loss_fn(scores, gt)
+
+    def calc_acc(self, scores, gt):
+        """
+        Calculate Accuracy
+        :param scores: The unnormalised logits
+        :param gt: A list of the true labels
+        :return:
+        """
+
+        if not isinstance(gt, torch.Tensor):
+            gt = torch.LongTensor(gt).to('cuda')
+        if len(gt.size()) > 1:
+            gt = gt.squeeze(1)
+        scores = scores.argmax(dim=-1)
+        if len(scores.size()) > 1:
+            scores = scores.squeeze(1)
+        return self.metric_fn(scores, gt)
+
+    def forward(self, suggested_answer, options, gt_answer):
+        score_0 = suggested_answer * options[:, 0, :]
+        score_0 = score_0.sum(1).unsqueeze(1)
+        score_1 = suggested_answer * options[:, 1, :]
+        score_1 = score_1.sum(1).unsqueeze(1)
+        score_2 = suggested_answer * options[:, 2, :]
+        score_2 = score_2.sum(1).unsqueeze(1)
+        scores = torch.cat([score_0, score_1, score_2], dim=1)
+        if gt_answer is not None:
+            loss = self.calc_loss(scores, gt_answer)
+            metric = self.calc_acc(scores[:, :3], gt_answer)
+            return scores, loss, metric
+        return scores, None, None
+
+
 class Cataphract(nn.Module):
 
     def __init__(self, args, hidden_size=512):
         super(Cataphract, self).__init__()
         self.args = args
-        self.num_layers = args.num_layers # Layers = 1
-        self.fc_a = nn.Linear(128, hidden_size)
+        self.num_layers = args.num_layers  # Layers = 1
+        self.fc_a = nn.Linear(768, hidden_size)
         self.fc_v = nn.Linear(512, hidden_size)
         self.fc_p = nn.Linear(768, hidden_size)
         self.fc_vid = nn.Linear(768, hidden_size)
@@ -428,19 +480,20 @@ class Cataphract(nn.Module):
         self.TempSegsSelect_Module = TemporalSegmentSelection(args)
         self.SpatRegsSelect_Module = SpatioRegionSelection(args)
 
-
         self.GlobalLocal_Module = GlobalLocalPrecption(args,
                                                        AVHanLayer(d_model=512, nhead=1, dim_feedforward=512),
                                                        num_layers=self.num_layers)
+
         self.GlobalSelf_Module = GlobalSelfAttn(args,
                                                 GlobalHanLayer(d_model=512, nhead=1, dim_feedforward=512),
                                                 num_layers=self.num_layers)
+
+        self.EmbeddingSimilarityOutput = EmbSimHead()
 
         self.tanh = nn.Tanh()
         self.fc_answer_pred = nn.Linear(512, 42)
 
     def forward(self, audio, visual, patch, video, ocr, question, qst_word, options, answer=None):
-
         ### 1. features input
         # audio: [B, T, C]
         # visual: [B, T, C]
@@ -452,18 +505,14 @@ class Cataphract(nn.Module):
         # options: [B,3,C]
         # answer: [B,1,C]
 
-        audio_feat = self.fc_a(audio)  # [B, T, C]
+        audio_feat = self.fc_a(audio).unsqueeze(1).repeat(1, 60, 1)  # TODO: REMOVE THIS
         visual_feat = self.fc_v(visual)  # [B, T, C]
         patch_feat = self.fc_p(patch)  # [B, T, N, C]
-        video_feat = self.fc_vid(video) # [B,T,C]
-        ocr_feat = self.fc_ocr(ocr) # [B,T,C]
+        # video_feat = self.fc_vid(video) # [B,T,C]
+        # ocr_feat = self.fc_ocr(ocr) # [B,T,C]
         qst_feat = self.fc_q(question).squeeze(-2)  # [B, C]
         word_feat = self.fc_word(qst_word).squeeze(-3)  # [B, 77, C]
         options_feat = self.fc_o(options)
-        if answer is not None:
-            answer = self.fc_o(answer)
-
-
 
         ### 2. Temporal segment selection module *******************************************************
         # audio and visual output: [B, top_k * T/segs, C], eg: [B, 2*5, C]
@@ -482,8 +531,9 @@ class Cataphract(nn.Module):
         ### 4. Global-local perception module **********************************************************
         audio_feat_gl, visual_feat_gl = self.GlobalLocal_Module(audio_feat, visual_feat)
 
+        ### 5. Global-local perception module 2 **********************************************************
+
         ### 6. Fusion module **************************************************************************
-        #visual_feat_fusion = torch.cat((visual_feat_tm, visual_patch_feat), dim=1)
         visual_feat_fusion = torch.cat((visual_patch_feat, visual_feat_gl), dim=1)
         audio_feat_fusion = torch.cat((audio_feat_tm, audio_feat_gl), dim=1)
 
@@ -496,6 +546,6 @@ class Cataphract(nn.Module):
         avq_feat = self.tanh(avq_feat)
 
         ### 7. Answer prediction moudule *************************************************************
-        answer_pred = self.fc_answer_pred(avq_feat)  # [batch_size, ans_vocab_size=42]
-
-        return answer_pred
+        # answer_pred = self.fc_answer_pred(avq_feat)  # [batch_size, ans_vocab_size=42]
+        logits, loss, metric = self.EmbeddingSimilarityOutput(avq_feat, options_feat, answer)
+        return logits, loss, metric

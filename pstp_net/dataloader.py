@@ -172,9 +172,10 @@ class PerceptionAVQA_dataset(Dataset):
         sample = self.samples[idx]
         name = sample['video_id']
         question_id = sample['question_id']
+        answer = sample['answer_id']
 
         audios_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_audioseg_1.pkl'))
-        ocr_feat = pickle_load(os.path.join(self.ocr_feat_dir, name + '_ocrseg_1.pkl'))
+        ocr_feat = pickle_load(os.path.join(self.ocr_feat_dir, name + '_ocrseg_1.pkl'))['ocr'][0]
         video_feat = pickle_load(os.path.join(self.video_feat_dir, name + '_seg_1.pkl'))
 
         visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_image_feats.npy'))
@@ -195,17 +196,6 @@ class PerceptionAVQA_dataset(Dataset):
         question_feat = np.load(os.path.join(self.clip_word_dir, str(question_id) + '_sent.npy'))
         options_feat = np.load(os.path.join(self.clip_word_ans_dir, str(question_id) + '_sent.npy'))
 
-        ### Answer
-        if sample['anser'] == sample['options'][0]:
-            answer_feat = options_feat[0, :, :]
-        elif sample['anser'] == sample['options'][1]:
-            answer_feat = options_feat[1,:,:]
-        elif sample['anser'] == sample['options'][2]:
-            answer_feat = options_feat[2, :, :]
-        else:
-            raise ValueError(f"Answer {sample['anser']} not in {sample['options']}")
-
-
         sample = {'video_name': name,
                   'audios_feat': audios_feat,
                   'ocr_feat': ocr_feat,
@@ -215,7 +205,7 @@ class PerceptionAVQA_dataset(Dataset):
                   'question': question_feat,
                   'qst_word': word_feat,
                   'options_feat': options_feat,
-                  'answer_feat': answer_feat,
+                  'answer_feat': answer,
                   'question_id': question_id}
 
         if self.transform:
@@ -229,18 +219,31 @@ class ToTensor(object):
     def __call__(self, sample):
         video_name = sample['video_name']
         audios_feat = sample['audios_feat']
+        ocr_feat = sample['ocr_feat']
+        video_feat = sample['video_feat']
         visual_feat = sample['visual_feat']
         patch_feat = sample['patch_feat']
         question = sample['question']
         qst_word = sample['qst_word']
-        answer_label = sample['answer_label']
+        options_feat = sample['options_feat']
+        answer_feat = sample['answer_feat']
         question_id = sample['question_id']
 
-        return {'video_name': video_name,
-                'audios_feat': torch.from_numpy(audios_feat).float(),
-                'visual_feat': torch.from_numpy(visual_feat).float(),
-                'patch_feat': torch.from_numpy(patch_feat).float(),
-                'question': torch.from_numpy(question).float(),
-                'qst_word': torch.from_numpy(qst_word).float(),
-                'answer_label': answer_label,
-                'question_id': question_id}
+
+        batch = {
+            'audios_feat': audios_feat.float(),
+            'ocr_feat': ocr_feat.float(),
+            'video_feat': video_feat.float(),
+            'visual_feat': torch.from_numpy(visual_feat).float(),
+            'patch_feat': torch.from_numpy(patch_feat).float(),
+            'question': torch.from_numpy(question[0]).float(),
+            'qst_word': torch.from_numpy(qst_word[0]).float(),
+            'options_feat': torch.from_numpy(options_feat).float(),
+            'answer_label': torch.LongTensor([answer_feat])
+        }
+
+
+
+        return batch
+        # 'video_name': video_name,
+        # 'question_id': question_id

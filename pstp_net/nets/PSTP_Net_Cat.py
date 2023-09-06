@@ -489,9 +489,7 @@ class Cataphract(nn.Module):
                                                 num_layers=self.num_layers)
 
         self.EmbeddingSimilarityOutput = EmbSimHead()
-
         self.tanh = nn.Tanh()
-        self.fc_answer_pred = nn.Linear(512, 42)
 
     def forward(self, audio, visual, patch, video, ocr, question, qst_word, options, answer=None):
         ### 1. features input
@@ -531,7 +529,6 @@ class Cataphract(nn.Module):
         ### 4. Global-local perception module **********************************************************
         audio_feat_gl, visual_feat_gl = self.GlobalLocal_Module(audio_feat, visual_feat)
 
-        ### 5. Global-local perception module 2 **********************************************************
 
         ### 6. Fusion module **************************************************************************
         visual_feat_fusion = torch.cat((visual_patch_feat, visual_feat_gl), dim=1)
@@ -542,10 +539,9 @@ class Cataphract(nn.Module):
         av_fusion_feat = self.GlobalSelf_Module(fusion_feat)
         av_fusion_feat = av_fusion_feat.mean(dim=-2)
 
-        avq_feat = torch.mul(av_fusion_feat, qst_feat)  # [batch_size, embed_size]
+        avq_feat = torch.mul(av_fusion_feat, qst_feat)
         avq_feat = self.tanh(avq_feat)
 
         ### 7. Answer prediction moudule *************************************************************
-        # answer_pred = self.fc_answer_pred(avq_feat)  # [batch_size, ans_vocab_size=42]
         logits, loss, metric = self.EmbeddingSimilarityOutput(avq_feat, options_feat, answer)
         return logits, loss, metric

@@ -69,7 +69,7 @@ parser.add_argument("--num_layers", type=int, default=1, metavar='num_layers',
 
 
 ### ======================== Learning Configs ==========================
-parser.add_argument('--batch-size', type=int, default=128, metavar='N',
+parser.add_argument('--batch-size', type=int, default=8, metavar='N',
                     help='input batch size for training (default: 8)')
 parser.add_argument('--epochs', type=int, default=30, metavar='E',
                     help='number of epochs to train (default: 20)')
@@ -93,7 +93,7 @@ parser.add_argument("--mode", type=str, default='train',
 ### ======================== Runtime Configs ==========================
 parser.add_argument('--log-interval', type=int, default=5, metavar='N',
                     help='how many batches to wait before logging training status')
-parser.add_argument('--num_workers', type=int, default=8,
+parser.add_argument('--num_workers', type=int, default=4,
                     help='num_workers number')
 parser.add_argument('--gpu', type=str, default='0',
                     help='gpu device number')

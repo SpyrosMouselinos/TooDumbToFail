@@ -6,7 +6,7 @@ import torch
 import tqdm
 import numpy as np
 from utils import load_db_json, get_video_frames, get_audio_frames, get_ocr_frames, OCR_RELEVANT_VIDEO_IDS_PATH, \
-    gather_ocr_videos
+    gather_ocr_videos, get_qo_frames
 import torch.nn as nn
 from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
 from transformers import AutoFeatureExtractor, HubertModel
@@ -58,6 +58,9 @@ elif EXTRACTED_MODALITY == 'Audio':
 elif EXTRACTED_MODALITY == 'Ocr':
     model = OCRmodel(dual_pass=True)
     model.to('cuda')
+elif EXTRACTED_MODALITY == 'QO':
+    processor = lambda x: torch.from_numpy(x).float()
+    model = lambda x: x
 else:
     raise NotImplementedError
 
@@ -191,6 +194,66 @@ def maybe_get_audio_frames(data_items, n_segments=1):
                                                  data_items[j]['metadata']['video_id']) + f'_audioseg_{n_segments}.pkl'
                 with open(audio_file_pickle, 'wb') as fout:
                     pickle.dump(aud_frames[j], fout)
+            return
+    return
+
+
+def get_qo_frames_wrapper(data_items):
+    loaded_questions = []
+    loaded_options = []
+    for i in range(STORE_BATCH_SIZE):
+        q_frames, o_frames = get_qo_frames(data_items[i],
+                                           video_folder,
+                                           override_video_name=False,
+                                           num_samples=None,
+                                           n_segments=None)
+        for s in range(N_SEGMENTS):
+            loaded_questions.append(q_frames[s])
+            loaded_options.append(o_frames[s])
+    q_frames = []
+    o_frames = []
+    loaded_q = np.concatenate(loaded_questions, axis=0)
+    loaded_o = np.concatenate(loaded_options, axis=0)
+    for i in range(len(loaded_q) // MINI_BATCH_SIZE):
+        slice = loaded_q[MINI_BATCH_SIZE * i: MINI_BATCH_SIZE * (i + 1)]
+        q_frames.append(model(slice))
+        slice = loaded_o[MINI_BATCH_SIZE * i: MINI_BATCH_SIZE * (i + 1)]
+        o_frames.append(model(slice))
+    assert len(q_frames) == STORE_BATCH_SIZE
+    assert len(o_frames) == STORE_BATCH_SIZE
+    return q_frames, o_frames
+
+
+def maybe_get_qo_frames(data_items, n_segments=1):
+    for i in range(len(data_items)):
+        audio_file_pickle = os.path.join(video_folder,
+                                         data_items[i]['metadata']['video_id']) + f'_audioseg_{n_segments}.pkl'
+        if os.path.exists(audio_file_pickle):
+            continue
+        else:
+            aud_frames = get_audio_frames_wrapper(data_items=data_items)
+            for j in range(len(data_items)):
+                audio_file_pickle = os.path.join(video_folder,
+                                                 data_items[j]['metadata']['video_id']) + f'_audioseg_{n_segments}.pkl'
+                with open(audio_file_pickle, 'wb') as fout:
+                    pickle.dump(aud_frames[j], fout)
+            return
+    return
+
+
+def maybe_get_ocr_frames(data_items, n_segments=1):
+    for i in range(len(data_items)):
+        video_file_pickle = os.path.join(video_folder,
+                                         data_items[i]['metadata']['video_id']) + f'_ocrseg_{n_segments}.pkl'
+        if os.path.exists(video_file_pickle) or not (data_items[i]['metadata']['video_id'] in OCR_RELEVANCE):
+            continue
+        else:
+            ocr_frames = get_ocr_frames_wrapper(data_items=data_items)
+            for j in range(len(data_items)):
+                video_file_pickle = os.path.join(video_folder,
+                                                 data_items[j]['metadata']['video_id']) + f'_ocrseg_{n_segments}.pkl'
+                with open(video_file_pickle, 'wb') as fout:
+                    pickle.dump({'ocr': ocr_frames[j]}, fout)
             return
     return
 

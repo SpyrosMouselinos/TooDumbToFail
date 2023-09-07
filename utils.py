@@ -63,10 +63,13 @@ TAG_AREA = {
 
 CAT = AREA + REASONING + TAG
 DATA_PATH = data_path = './data/'
+CLIP_Q_DATA_PATH = DATA_PATH + '/PERCEPTION/clip_word'
+CLIP_A_DATA_PATH = DATA_PATH + '/PERCEPTION/clip_word_ans'
 TRAIN_DATA_PATH = train_data_path = DATA_PATH + 'train/'
 VALID_DATA_PATH = valid_data_path = DATA_PATH + 'valid/'
-ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keysword_overlap.json' # Use gather answers to make this
-OCR_RELEVANT_VIDEO_IDS_PATH = ocr_relevant_video_ids_path = DATA_PATH + 'ocr_rel_videos.json' # Use gather ocr videos to make this
+ANSWER_DATA_PATH = answer_data_path = DATA_PATH + 'answer_keysword_overlap.json'  # Use gather answers to make this
+OCR_RELEVANT_VIDEO_IDS_PATH = ocr_relevant_video_ids_path = DATA_PATH + 'ocr_rel_videos.json'  # Use gather ocr videos to make this
+
 
 def download_and_unzip(url: str, destination: str):
     """Downloads and unzips a .zip file to a destination.
@@ -175,6 +178,7 @@ def gather_answers(db_files):
     with open(ANSWER_DATA_PATH, 'w') as fout:
         json.dump(new_dict, fout)
     return
+
 
 def gather_ocr_videos(db_files):
     """
@@ -311,10 +315,33 @@ def get_ocr_frames(data_item: Dict[str, Any],
                    resize_to=None,
                    num_samples=16,
                    n_segments=1) -> np.array:
-
     return get_video_frames(data_item=data_item, video_folder_path=video_folder_path,
                             override_video_name=override_video_name, resize_to=resize_to, num_samples=num_samples,
                             n_segments=n_segments)
+
+
+def get_qo_frames(data_item: Dict[str, Any],
+                  q_folder_path: str,
+                  a_folder_path: str,
+                  override_video_name: bool = False, num_samples=16, n_segments=1) -> np.array:
+    """
+    Loads clip processed question / answers
+    """
+
+    if override_video_name:
+        question_file = os.path.join(q_folder_path,
+                                     '8241_sent') + '.npy'
+        answer_file = os.path.join(a_folder_path,
+                                   '8241_sent') + '.npy'
+    else:
+        question_file = os.path.join(q_folder_path,
+                                     data_item['metadata']['video_id']) + '_sent.npy'
+        answer_file = os.path.join(a_folder_path,
+                                   data_item['metadata']['video_id']) + '_sent.npy'
+
+    question_feat = np.load(question_file)
+    answer_feat = np.load(answer_file)
+    return question_feat, answer_feat
 
 
 def atest_video(valid_db_dict, video_id='video_8241'):
@@ -577,5 +604,3 @@ def generate_answer_keys_for_test(train_val_answer_keys, test_questions, method=
         new_dict.update({k: new_dict[v]})
     with open(org_name + method + '.json', 'w') as fout:
         json.dump(new_dict, fout)
-
-

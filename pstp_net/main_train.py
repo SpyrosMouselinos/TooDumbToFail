@@ -122,15 +122,15 @@ def main():
 
     model = Cataphract(args)
     model = model.to('cuda')
-    audio_input = torch.randn(1, 768).to('cuda')
-    visual_input = torch.randn(1, 60, 512).to('cuda')
-    patch_input = torch.randn(1, 60, 50, 768).to('cuda')
-    video_input = torch.randn(1, 768).to('cuda')
-    ocr_input = torch.randn(1, 768).to('cuda')
-    question_input = torch.randn(1, 1, 512).to('cuda')  # Squeezed inside first block
-    qst_word_input = torch.randn(1, 1, 77, 512).to('cuda')  # Squeezed inside third block
-    options_input = torch.randn(1, 3, 512).to('cuda')
-    answer = torch.zeros(1, dtype=torch.long).to('cuda')
+    audio_input = torch.randn(2, 768).to('cuda')
+    visual_input = torch.randn(2, 60, 512).to('cuda')
+    patch_input = torch.randn(2, 60, 50, 768).to('cuda')
+    video_input = torch.randn(2, 768).to('cuda')
+    ocr_input = torch.randn(2, 768).to('cuda')
+    question_input = torch.randn(2, 1, 512).to('cuda')  # Squeezed inside first block
+    qst_word_input = torch.randn(2, 1, 77, 512).to('cuda')  # Squeezed inside third block
+    options_input = torch.randn(2, 3, 512).to('cuda')
+    answer = torch.zeros(2, dtype=torch.long).to('cuda')
 
     flops, params = profile(model, inputs=(
         audio_input, visual_input, patch_input, video_input, ocr_input, question_input, qst_word_input, options_input,
@@ -138,6 +138,13 @@ def main():
     print("profile: ", flops, params)
     flops, params = clever_format([flops, params], "%.3f")
     print("clever: ", flops, params)
+
+    # data = torch.load('./runs/models_pstp_cat/Test_No_Vid.pt')
+    # ### Kick out Time Encoder / Space Encoder ###
+    # ignore = [f for f in data.keys() if 'time' in f] + [f for f in data.keys() if 'space' in f]
+    # for i in ignore:
+    #     data.pop(i)
+    # model.load_state_dict(data,strict=False)
 
     # -------------> Computation costs end
 
@@ -166,15 +173,15 @@ def main():
                                          transform=transforms.Compose([ToTensor()]),
                                          mode_flag='valid')
     # TODO: CHANGE THIS
-    print("You train on val and val on train!")
-    train_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+    #print("You train on val and val on train!")
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                               pin_memory=False)
 
-    val_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                             pin_memory=False)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
 
     best_acc = 0
     best_epoch = 0

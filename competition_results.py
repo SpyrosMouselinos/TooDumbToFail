@@ -1,17 +1,9 @@
-import copy
 import json
-import pickle
-
-import torch.nn.functional
 import tqdm
 
 from data import PerceptionDataset
-from models.FreqBaseline import FreqMCVQABaseline, VideoFreqMCVQABaseline, VideoLangMCVQABaseline
-from models.LearnableAudioBaseline import VideoAudioFreqLearnMCVQA
-from models.LearnableBaseline import VideoLangLearnMCVQA, VideoFreqLearnMCVQA
-from models.OcrAugmentedModel import OCRVideoAudioMCVQA
-from utils import load_db_json, CAT, calc_top, calc_top_by_cat
-import numpy as np
+from models.SoftRetrieval import SR_MCVQA
+from utils import load_db_json
 
 train_db_path = 'data/mc_question_train.json'
 train_db_dict = load_db_json(train_db_path)
@@ -47,21 +39,17 @@ test_cfg = {'video_folder': './data/test/',
             }
 
 test_mc_vqa_dataset = PerceptionDataset(test_db_dict, **test_cfg)
-# model = VideoAudioFreqLearnMCVQA(active_ds=val_mc_vqa_dataset,
-#                                  cache_ds=train_mc_vqa_dataset.union(val_mc_vqa_dataset),
-#                                  use_embedding=True,
-#                                  use_aux_loss=0,
-#                                  overconfidence_loss=None, model_version=1)
-#
-# model.load_weights('Model_Trained.pth.pth')
-# model.model.eval()
 train_mc_vqa_dataset.union(val_mc_vqa_dataset)
-model = OCRVideoAudioMCVQA(active_ds=None,
-                           cache_ds=train_mc_vqa_dataset,
-                           use_embedding=False,
-                           use_aux_loss=0,
-                           model_version=4, top_k=25, train_skip_self=False)
+model = SR_MCVQA(active_ds=None,
+                 cache_ds=train_mc_vqa_dataset,
+                 use_embedding=False,
+                 use_aux_loss=0,
+                 model_version=5,
+                 top_k=25,
+                 train_skip_self=True)
+model.load_weights(path='SR_MCVQA_Model5.pth')
 model.model.eval()
+
 answers = {}
 for video_item in tqdm.tqdm(test_mc_vqa_dataset):
     # for video_item in val_mc_vqa_dataset:
@@ -93,5 +81,5 @@ for video_item in tqdm.tqdm(test_mc_vqa_dataset):
 
     answers[video_id] = video_answers
 
-with open('test_results_static_retrieve_ocr.json', 'w') as my_file:
+with open('test_results_soft_retrieve.json', 'w') as my_file:
     json.dump(answers, my_file)

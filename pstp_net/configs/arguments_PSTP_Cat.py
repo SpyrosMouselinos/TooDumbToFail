@@ -52,9 +52,9 @@ parser.add_argument("--use_word", type=bool, default=True, metavar='uc',
                     help="word encoder module")
 parser.add_argument("--temp_select", type=bool, default=True, metavar='tsm',
                     help="temporal segments selection module")
-parser.add_argument("--segs", type=int, default=12, metavar='SEG',
+parser.add_argument("--segs", type=int, default=60, metavar='SEG',
                     help="temporal segment numbers segments")
-parser.add_argument("--top_k", type=int, default=2, metavar='TK',
+parser.add_argument("--top_k", type=int, default=10, metavar='TK',
                     help="top K temporal segments")
 parser.add_argument("--spat_select", type=bool, default=True, metavar='ssm',
                     help="spatio regions selection module")
@@ -64,25 +64,25 @@ parser.add_argument("--global_local", type=bool, default=True, metavar='glm',
                     help="global local perception module")
 parser.add_argument("--temp_grd", type=bool, default=False, metavar='tgm',
                     help="temporal grounding module")
-parser.add_argument("--num_layers", type=int, default=1, metavar='num_layers',
+parser.add_argument("--num_layers", type=int, default=4, metavar='num_layers',
                     help="num_layers")
 
 
 ### ======================== Learning Configs ==========================
-parser.add_argument('--batch-size', type=int, default=8, metavar='N',
+parser.add_argument('--batch-size', type=int, default=64, metavar='N',
                     help='input batch size for training (default: 8)')
 parser.add_argument('--epochs', type=int, default=30, metavar='E',
                     help='number of epochs to train (default: 20)')
-parser.add_argument('--lr', type=float, default=3e-4, metavar='LR',
+parser.add_argument('--lr', type=float, default=1e-3, metavar='LR',
                     help='learning rate (default: 3e-4)')
-parser.add_argument('--eval_every', type=int, default=2, metavar='eval_every',
+parser.add_argument('--eval_every', type=int, default=5, metavar='eval_every',
                     help='eval every epochs')
 parser.add_argument('--seed', type=int, default=1, metavar='S',
                     help='random seed (default: 1)')
 
 
 ### ======================== Save Configs ==========================
-parser.add_argument( "--checkpoint", type=str, default='PSTP_Cat_swapped_datasets',
+parser.add_argument( "--checkpoint", type=str, default='Test_No_Vid',
                     help="save model name")
 parser.add_argument("--model_save_dir", type=str, default='/home/spyros/Desktop/TooDumbToFail/pstp_net/runs/models_pstp_cat/',
                     help="model save dir")
@@ -93,7 +93,7 @@ parser.add_argument("--mode", type=str, default='train',
 ### ======================== Runtime Configs ==========================
 parser.add_argument('--log-interval', type=int, default=5, metavar='N',
                     help='how many batches to wait before logging training status')
-parser.add_argument('--num_workers', type=int, default=4,
+parser.add_argument('--num_workers', type=int, default=2,
                     help='num_workers number')
 parser.add_argument('--gpu', type=str, default='0',
                     help='gpu device number')

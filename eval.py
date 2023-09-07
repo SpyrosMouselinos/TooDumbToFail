@@ -7,8 +7,7 @@ import tqdm
 
 from data import PerceptionDataset
 from models.FreqBaseline import FreqMCVQABaseline, VideoFreqMCVQABaseline, VideoLangMCVQABaseline
-from models.LearnableAudioBaseline import VideoAudioFreqLearnMCVQA
-from models.LearnableBaseline import VideoLangLearnMCVQA, VideoFreqLearnMCVQA
+from models.SoftRetrieval import SR_MCVQA
 from utils import load_db_json, CAT, calc_top, calc_top_by_cat
 import numpy as np
 

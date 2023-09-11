@@ -3,16 +3,17 @@ import json
 import os
 import pickle
 from typing import List, Dict, Any
+
+import numpy as np
 import torch
 import torch.nn as nn
 import tqdm
 
 from utils import load_db_json, get_video_frames, get_audio_frames, get_ocr_frames, OCR_RELEVANT_VIDEO_IDS_PATH, \
-    gather_ocr_videos
+    gather_ocr_videos, get_qo_frames
 from transformers import VideoMAEForVideoClassification, \
     VideoMAEImageProcessor, AutoFeatureExtractor, HubertModel
 from models.OCR_model import OCRmodel
-
 
 
 class PerceptionDataset:
@@ -33,7 +34,9 @@ class PerceptionDataset:
                  js_only: bool,
                  use_audio: bool = False,
                  use_ocr: bool = False,
-                 auto_unload: bool = True) -> None:
+                 use_qo: bool = False,
+                 auto_unload: bool = True,
+                 qo_folders: List[str] = []) -> None:
         """Initializes the PerceptionDataset class.
 
         Args:
@@ -48,6 +51,7 @@ class PerceptionDataset:
         """
         self.js_only = js_only
         self.video_folder = video_folder
+        self.qo_folders = qo_folders
         self.task = task
         self.split = split
         self.pt_db_list = self.load_dataset(pt_db_dict)
@@ -56,6 +60,7 @@ class PerceptionDataset:
         self.ocr_load_flag = False
         self.use_audio = use_audio
         self.use_ocr = use_ocr
+        self.use_qo = use_qo
         self.auto_unload = auto_unload
         """
         Add conditional check to skip this if the video at hand is irrelevant to OCR
@@ -222,6 +227,13 @@ class PerceptionDataset:
             ocr_frames = torch.zeros(size=(1, 768))
         return ocr_frames
 
+    def _get_qo_frames(self, data_item):
+        N_SEGMENTS = 1
+        q_frames, o_frames = get_qo_frames(data_item, self.qo_folders[0][0], self.qo_folders[0][1],
+                                           override_video_name=False,
+                                           num_samples=16, n_segments=N_SEGMENTS)
+        return q_frames, o_frames
+
     def _maybe_get_video_frames(self, data_item, n_segments=1):
         if isinstance(self.video_folder, str):
             video_file_pickle = os.path.join(self.video_folder,
@@ -315,6 +327,35 @@ class PerceptionDataset:
                     pass
         return ocr_frames
 
+    def _maybe_get_qo_frames(self, data_item, n_segments=1):
+        if len(self.qo_folders) == 1:
+            question_file = os.path.join(self.qo_folders[0][0],
+                                         data_item['metadata']['video_id'].split('_')[1]) + f'_sent.npy'
+            option_file = os.path.join(self.qo_folders[0][1],
+                                       data_item['metadata']['video_id'].split('_')[1]) + f'_sent.npy'
+            if os.path.exists(question_file) and os.path.exists(option_file):
+                # Unpickle and return
+                question_feat = torch.from_numpy(np.load(question_file)).float()
+                answer_feat = torch.from_numpy(np.load(option_file)).float()
+            else:
+                question_feat, answer_feat = self._get_qo_frames(data_item=data_item)
+        elif len(self.qo_folders) == 2:
+            for folder_pair in self.qo_folders:
+                try:
+                    question_file = os.path.join(folder_pair[0],
+                                                 data_item['metadata']['video_id'].split('_')[1]) + f'_sent.npy'
+                    option_file = os.path.join(folder_pair[1],
+                                               data_item['metadata']['video_id'].split('_')[1]) + f'_sent.npy'
+                    if os.path.exists(question_file) and os.path.exists(option_file):
+                        # Unpickle and return
+                        question_feat = torch.from_numpy(np.load(question_file)).float()
+                        answer_feat = torch.from_numpy(np.load(option_file)).float()
+                    else:
+                        question_feat, answer_feat = self._get_qo_frames(data_item=data_item)
+                except:
+                    pass
+        return question_feat, answer_feat
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """Returns the video and annotations for a given index.
 
@@ -351,6 +392,13 @@ class PerceptionDataset:
                 ocr_frames = torch.rand(size=(1, 768))
             else:
                 ocr_frames = None
+
+            if self.use_qo:
+                q_frames = torch.rand(size=(1, 512))
+                o_frames = torch.rand(size=(3, 512))
+            else:
+                q_frames = None
+                o_frames = None
         else:
             vid_frames = self._maybe_get_video_frames(data_item=data_item, n_segments=1)
             if self.use_audio:
@@ -361,12 +409,18 @@ class PerceptionDataset:
                 ocr_frames = self._maybe_get_ocr_frames(data_item=data_item, n_segments=1)
             else:
                 ocr_frames = None
+            if self.use_qo:
+                q_frames, o_frames = self._maybe_get_qo_frames(data_item=data_item, n_segments=1)
+            else:
+                q_frames, o_frames = None, None
 
         return {'metadata': metadata,
                 self.task: annot,
                 'frames': vid_frames,
                 'audio': aud_frames,
-                'ocr': ocr_frames
+                'ocr': ocr_frames,
+                'clip_q_frames': q_frames,
+                'clip_o_frames': o_frames
                 }
 
     def union(self, otherDataset):
@@ -378,6 +432,7 @@ class PerceptionDataset:
         assert self.ocr_load_flag == otherDataset.ocr_load_flag
         assert self.use_audio == otherDataset.use_audio
         assert self.use_ocr == otherDataset.use_ocr
+        assert self.use_qo == otherDataset.use_qo
         assert self.auto_unload == otherDataset.auto_unload
 
         # If everything is ok you need to merge the pt_db_list and update the length of the new dataset
@@ -386,6 +441,8 @@ class PerceptionDataset:
         print(f"New dataset length: {len(self.pt_db_list)}")
         print("Setting mixed video folder...")
         self.video_folder = (self.video_folder, otherDataset.video_folder)
+        print("Setting mixed qo folder...")
+        self.qo_folders = self.qo_folders + otherDataset.qo_folders
         return
 
     def __add__(self, other):
@@ -393,30 +450,27 @@ class PerceptionDataset:
         return self
 
 
-
-
-
-def atest_dataset_with_video_and_audio_and_ocr():
-    split = 'test'
+def atest_dataset_with_video_and_audio_and_ocr_and_qo():
+    split = 'train'
     cfg = {'video_folder': f'./data/{split}/videos' if split == 'train' else f'./data/{split}',
+           'qo_folders': [[f'./data/PERCEPTION/clip_word', f'./data/PERCEPTION/clip_word_ans']],
            'task': 'mc_question',
            'split': split,
            'js_only': False,
            'use_audio': True,
-           'use_ocr': True,
+           'use_ocr': False,
+           'use_qo': True,
            }
-    with open(OCR_RELEVANT_VIDEO_IDS_PATH, 'r') as fin:
-        ocr_list = json.load(fin)
+    # with open(OCR_RELEVANT_VIDEO_IDS_PATH, 'r') as fin:
+    #     ocr_list = json.load(fin)
     train_db_path = f"data/mc_question_{cfg['split']}.json"
     train_db_dict = load_db_json(train_db_path)
     dataset = PerceptionDataset(train_db_dict, **cfg)
+    dataset.union(dataset)
     for item in tqdm.tqdm(dataset):
-        if item['metadata']['video_id'] in ocr_list:
-            assert item['ocr'].sum() >= 0
-        else:
-            assert item['ocr'].sum() == 0
+        print('Item')
     print("End")
 
 
 if __name__ == '__main__':
-    atest_dataset_with_video_and_audio_and_ocr()
+    atest_dataset_with_video_and_audio_and_ocr_and_qo()

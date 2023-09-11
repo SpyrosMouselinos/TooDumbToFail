@@ -20,6 +20,8 @@ train_db_path = f'data/mc_question_{SPLIT}.json'
 pt_db_dict = load_db_json(train_db_path)
 
 video_folder = f'./data/{SPLIT}/' if SPLIT != 'train' else f'./data/{SPLIT}/videos'
+CLIP_Q_DATA_PATH = './data/PERCEPTION/clip_word'
+CLIP_O_DATA_PATH = './data/PERCEPTION/clip_word_ans'
 task = 'mc_question'
 N_SEGMENTS = 1
 MINI_BATCH_SIZE = 16
@@ -226,18 +228,14 @@ def get_qo_frames_wrapper(data_items):
 
 def maybe_get_qo_frames(data_items, n_segments=1):
     for i in range(len(data_items)):
-        audio_file_pickle = os.path.join(video_folder,
-                                         data_items[i]['metadata']['video_id']) + f'_audioseg_{n_segments}.pkl'
-        if os.path.exists(audio_file_pickle):
+        q_file_numpy = os.path.join(CLIP_Q_DATA_PATH,
+                                    data_items[i]['metadata']['video_id']) + f'_sent.npy'
+        o_file_numpy = os.path.join(CLIP_O_DATA_PATH,
+                                    data_items[i]['metadata']['video_id']) + f'_sent.npy'
+        if os.path.exists(q_file_numpy) and os.path.exists(o_file_numpy):
             continue
         else:
-            aud_frames = get_audio_frames_wrapper(data_items=data_items)
-            for j in range(len(data_items)):
-                audio_file_pickle = os.path.join(video_folder,
-                                                 data_items[j]['metadata']['video_id']) + f'_audioseg_{n_segments}.pkl'
-                with open(audio_file_pickle, 'wb') as fout:
-                    pickle.dump(aud_frames[j], fout)
-            return
+            raise NotImplementedError('CLIP text extraction is not implemented')
     return
 
 
@@ -286,6 +284,16 @@ elif EXTRACTED_MODALITY == 'Ocr':
             real_jdx = batch_idx * STORE_BATCH_SIZE + jdx
             data_items.append(pt_db_list[real_jdx])
         maybe_get_ocr_frames(data_items=data_items, n_segments=1)
+    t = time.time() - s
+    print(t)
+elif EXTRACTED_MODALITY == 'QO':
+    s = time.time()
+    for batch_idx in tqdm.trange(total_length // STORE_BATCH_SIZE):
+        data_items = []
+        for jdx in range(STORE_BATCH_SIZE):
+            real_jdx = batch_idx * STORE_BATCH_SIZE + jdx
+            data_items.append(pt_db_list[real_jdx])
+        maybe_get_qo_frames(data_items=data_items, n_segments=1)
     t = time.time() - s
     print(t)
 else:

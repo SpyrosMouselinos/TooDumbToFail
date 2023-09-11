@@ -1,6 +1,9 @@
 import copy
 import json
+import os
 from typing import Dict, Any
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -253,14 +256,17 @@ class IterableLookUpV2(Dataset):
                  cached_db=None,
                  model_emb=None,
                  answer_data_json=None,
-                 top_k=25, use_embedding=False):
+                 top_k=25, use_embedding=False, lfoh=True, qo_folders=[]):
         self.use_embedding = use_embedding
         self.answer_data_json = answer_data_json
         self.model_emb = model_emb
         self.top_k = top_k
+        self.lfoh = lfoh
         if cached_db is None:
             cached_db = active_db
+        self.qo_folders = qo_folders
         self.reorder_db(active_db, cached_db)
+
         return
 
     def custom_collate_fn(self, batch):
@@ -289,12 +295,15 @@ class IterableLookUpV2(Dataset):
                 NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
         # Expand Options #
         if not self.use_embedding:
-            NEW_BATCH['o'] = torch.nn.functional.one_hot(NEW_BATCH['o'], num_classes=6370).squeeze(1).to('cuda')
-            NEW_BATCH['o'] = NEW_BATCH['o'].float()
-            NEW_BATCH['n_answers'] = torch.nn.functional.one_hot(NEW_BATCH['n_answers'], num_classes=6370).squeeze(
-                1).to(
-                'cuda')
-            NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].float()
+            if self.lfoh:
+                NEW_BATCH['o'] = torch.nn.functional.one_hot(NEW_BATCH['o'], num_classes=6370).squeeze(1).to('cuda')
+                NEW_BATCH['o'] = NEW_BATCH['o'].float()
+                NEW_BATCH['n_answers'] = torch.nn.functional.one_hot(NEW_BATCH['n_answers'], num_classes=6370).squeeze(
+                    1).to(
+                    'cuda')
+                NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].float()
+            else:
+                pass
         else:
             NEW_BATCH['o'] = NEW_BATCH['o'].long()
             NEW_BATCH['n_answers'] = NEW_BATCH['n_answers'].long()
@@ -314,10 +323,18 @@ class IterableLookUpV2(Dataset):
             # Get YOUR QUESTIONS #
             for active_question_items in active_entry['mc_question']:
                 # Get YOUR OPTIONS #
-                active_option_frames = active_question_items['options']
                 if self.answer_data_json is not None:
+                    active_option_frames = active_question_items['options']
                     active_option_frames = torch.LongTensor(
                         [self.answer_data_json[f]['int_index'] for f in active_option_frames])
+                elif self.answer_data_json is None and self.lfoh is False:
+                    ### Find and load the active Options ###
+                    # question_file = os.path.join(self.qo_folders[0][0],
+                    #                              active_entry['metadata']['video_id'].split('_')[1]) + '_sent.npy'
+                    answer_file = os.path.join(self.qo_folders[0][1],
+                                               active_entry['metadata']['video_id'].split('_')[1]) + '_sent.npy'
+                    #question_feat = torch.from_numpy(np.load(question_file)).float()
+                    active_option_frames = torch.from_numpy(np.load(answer_file)).float()
                 # Get YOUR GT ANSWER (if any) #
                 active_gt_frames = active_question_items['answer_id']
                 # Get the same question in the cached dataset #
@@ -329,7 +346,10 @@ class IterableLookUpV2(Dataset):
                 cached_ocr_frames = torch.stack(cached_question_items['ocr_emb'], dim=0).squeeze(1)
 
                 # Get the Answers from it #
-                cached_answer_frames = torch.LongTensor(cached_question_items['answer'])
+                if self.answer_data_json is not None:
+                    cached_answer_frames = torch.LongTensor(cached_question_items['answer'])
+                elif self.answer_data_json is None and self.lfoh is False:
+                    cached_answer_frames = torch.stack(cached_question_items['answer'], dim=0)
 
                 # Find top k video frames #
                 top_k_video_frames = cached_video_frames
@@ -379,11 +399,11 @@ class SR_MCVQA_EMB:
                  look_for_one_hot=True,
                  use_embedding=False,
                  common_dropout=0.25,
-                 use_aux_loss=0, model_version=3, top_k=25, train_skip_self=False, *args):
+                 use_aux_loss=0, model_version=5, top_k=25, train_skip_self=False, *args):
         self.top_k = top_k
         self.lfoh = look_for_one_hot
         self.use_embedding = use_embedding
-        self.embedding_transformer = SentenceTransformer(f'sentence-transformers/{model_emb}')
+        self.embedding_transformer = None
         self.model_version = model_version
         if self.model_version == 5:
             self.model = MultiRetrievalAugmentedEmbeddingV5(use_embedding=use_embedding,
@@ -398,8 +418,12 @@ class SR_MCVQA_EMB:
             o = torch.zeros(1, 3, dtype=torch.long).to('cuda')
             n_answ = torch.zeros(1, 25, dtype=torch.long).to('cuda')
         else:
-            o = torch.zeros(1, 3, 6370).to('cuda')
-            n_answ = torch.zeros(1, 25, 6370).to('cuda')
+            if self.lfoh:
+                o = torch.zeros(1, 3, 6370).to('cuda')
+                n_answ = torch.zeros(1, 25, 6370).to('cuda')
+            else:
+                o = torch.zeros(1, 3, 512).to('cuda')
+                n_answ = torch.zeros(1, 25, 512).to('cuda')
         n_feats = torch.zeros(1, 25, 768).to('cuda')
         n_auds = torch.zeros(1, 25, 768).to('cuda')
         n_ocrs = torch.ones(1, 25, 768).to('cuda')
@@ -409,7 +433,7 @@ class SR_MCVQA_EMB:
             self._cache_ds = self.build_video_answer_db_2(cache_ds)
         else:
             self._cache_ds = self.build_video_answer_db_2(active_ds)
-
+        self.qo_folders = self._active_ds.qo_folders
         self.freeze_retrieval_part()
 
     def build_video_answer_db_2(self, dataset) -> Dict[str, Any]:
@@ -447,7 +471,7 @@ class SR_MCVQA_EMB:
                 if self.lfoh:
                     answer = self.answer_data_json[question['options'][question['answer_id']]]['int_index']
                 else:
-                    answer = self.embedding_transformer.encode(question['options'][question['answer_id']])
+                    answer = entry['clip_o_frames'][question['answer_id'], :]
 
                 answer_int = int(question['answer_id'])
                 video_emb = entry['frames'].cpu()
@@ -457,7 +481,7 @@ class SR_MCVQA_EMB:
                 if self.lfoh:
                     options = [self.answer_data_json[f]['int_index'] for f in question['options']]
                 else:
-                    options = self.embedding_transformer.encode(question['options'])
+                    options = entry['clip_o_frames']
                 question_db[question['question']]['video_emb'].append(video_emb)
                 question_db[question['question']]['audio_emb'].append(audio_emb)
                 question_db[question['question']]['ocr_emb'].append(ocr_emb)
@@ -473,7 +497,8 @@ class SR_MCVQA_EMB:
         dataset = IterableLookUpV2(active_db=self._active_ds,
                                    cached_db=self._cache_ds,
                                    model_emb=self.embedding_transformer,
-                                   answer_data_json=self.answer_data_json, use_embedding=self.use_embedding)
+                                   answer_data_json=self.answer_data_json, use_embedding=self.use_embedding,
+                                   lfoh=self.lfoh, qo_folders=self.qo_folders)
 
         dataloader = DataLoader(dataset=dataset,
                                 batch_size=FIXED_BATCH_SIZE,
@@ -551,7 +576,8 @@ class SR_MCVQA_EMB:
         dataset = IterableLookUpV2(active_db=active_db,
                                    cached_db=self._cache_ds,
                                    model_emb=self.embedding_transformer,
-                                   answer_data_json=self.answer_data_json, use_embedding=self.use_embedding)
+                                   answer_data_json=self.answer_data_json, use_embedding=self.use_embedding,
+                                   lfoh=self.lfoh)
 
         dataloader = DataLoader(dataset=dataset,
                                 batch_size=FIXED_BATCH_SIZE,
@@ -669,6 +695,8 @@ class SR_MCVQA_EMB:
             ### Fix incoming masks ###
             if n_ids is not None:
                 _n_ids = None
+        else:
+            print("FIX THIIIIIIS")
         with torch.no_grad():
             _sim_scores, _, _ = self.model(
                 v=_frames,
@@ -692,4 +720,6 @@ class SR_MCVQA_EMB:
         self.model.eval()
 
     def freeze_retrieval_part(self):
-        pass
+        ### Freeze the retrieval mechanism ###
+
+        return

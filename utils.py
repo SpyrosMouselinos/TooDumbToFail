@@ -6,6 +6,7 @@ import requests
 from typing import Dict, Any
 import decord as de
 from nltk import pos_tag, word_tokenize
+import torch
 from tqdm import tqdm
 import numpy as np
 
@@ -339,8 +340,8 @@ def get_qo_frames(data_item: Dict[str, Any],
         answer_file = os.path.join(a_folder_path,
                                    data_item['metadata']['video_id']) + '_sent.npy'
 
-    question_feat = np.load(question_file)
-    answer_feat = np.load(answer_file)
+    question_feat = torch.from_numpy(np.load(question_file)).float()
+    answer_feat = torch.from_numpy(np.load(answer_file)).float()
     return question_feat, answer_feat
 
 

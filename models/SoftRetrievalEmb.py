@@ -27,6 +27,14 @@ class RetrievalSelection(nn.Module):
         self.train_skip_self = train_skip_self
         self.attn_qst_query = nn.MultiheadAttention(hidden_state_size, 4, dropout=0.1)
 
+    def topkfilter(self, score_vector, top_k_indices):
+        top_k_indices = top_k_indices.squeeze(0)
+        mask = torch.zeros(size=(score_vector.size()[-1],), device='cuda')
+        mask[top_k_indices] = 1
+        mask = mask.unsqueeze(0)
+        score_vector = score_vector * mask
+        return score_vector
+
     def soft_attention_select_2d(self, query_feat, kv_feat, mask):
         kv_feat = kv_feat.permute(1, 0, 2)
         query_feat = query_feat.unsqueeze(0)
@@ -37,7 +45,8 @@ class RetrievalSelection(nn.Module):
     def find_top_k_fast(self, temp_weights, modality):
         _, top_k_index_sort = torch.topk(temp_weights, k=min(self.top_k, temp_weights.size()[-1]), dim=-1)
         modality_new = modality[torch.arange(modality.size(0)).unsqueeze(1), top_k_index_sort.squeeze(1)]
-        return modality_new, top_k_index_sort
+        temp_weights_new = self.topkfilter(temp_weights, top_k_index_sort)
+        return modality_new, top_k_index_sort, temp_weights_new
 
     def select_top_k_fast(self, patch_feat, top_k_index_sort):
         patch_select_new = patch_feat[torch.arange(patch_feat.size(0)).unsqueeze(1), top_k_index_sort.squeeze(1)]
@@ -49,12 +58,12 @@ class RetrievalSelection(nn.Module):
         else:
             mask = None
         temp_weights = self.soft_attention_select_2d(key, query, mask)
-        top_k_query, top_k_index_sort = self.find_top_k_fast(temp_weights, query)
+        top_k_query, top_k_index_sort, temp_weights_new = self.find_top_k_fast(temp_weights, query)
         if value is None:
-            return temp_weights, top_k_query, None
+            return temp_weights_new, top_k_query, None
         else:
             top_k_value = self.select_top_k_fast(value, top_k_index_sort)
-        return temp_weights, top_k_query, top_k_value
+        return temp_weights_new, top_k_query, top_k_value
 
 
 class TrainableSoftTopK(nn.Module):
@@ -120,6 +129,27 @@ class TrainableSoftTopK(nn.Module):
         return attention
 
 
+class OptionHead(nn.Module):
+    def __init__(self, mode='cos'):
+        super().__init__()
+        self.mode = mode
+        if self.mode == 'add':
+            self.dropout = nn.Dropout(p=0.1)
+            self.linear = nn.Linear(512, 512)
+            self.act = nn.Tanh()
+            self.reduce = nn.Linear(512, 1)
+        elif self.mode == 'cos':
+            pass
+
+    def forward(self, answer, option, **args):
+        if self.mode == 'add':
+            pass
+        elif self.mode == 'cos':
+            score = answer * option
+            score = score.sum(1).unsqueeze(1)
+            return score
+
+
 class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
     def __init__(self,
                  v_dim=768,
@@ -171,6 +201,9 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
                                                       train_skip_self=train_skip_self)
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
+        #############################################
+        self.option_reshape = nn.Sequential(nn.LayerNorm(512), nn.Tanh(), nn.Linear(512, 512), nn.LayerNorm(512))
+        self.option_head = OptionHead(mode='cos')
 
     def calc_loss(self, scores, gt):
         """
@@ -223,15 +256,17 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
             ocr = None
             ocr2 = None
         mix_informed_answer = self.similarity_suggestor(v, v2, aud, aud2, ocr, ocr2)
+        #############################################
         options_informed_answer = mix_informed_answer * o2
         options_informed_answer = options_informed_answer.sum(1)
         #############################################
-        score_0 = options_informed_answer * o[:, 0, :]
-        score_0 = score_0.sum(1).unsqueeze(1)
-        score_1 = options_informed_answer * o[:, 1, :]
-        score_1 = score_1.sum(1).unsqueeze(1)
-        score_2 = options_informed_answer * o[:, 2, :]
-        score_2 = score_2.sum(1).unsqueeze(1)
+        options_informed_answer = self.option_reshape(options_informed_answer)
+        #############################################
+        score_0 = self.option_head(options_informed_answer, o[:, 0, :])
+        score_1 = self.option_head(options_informed_answer, o[:, 1, :])
+        score_2 = self.option_head(options_informed_answer, o[:, 2, :])
+        #############################################
+
         if self.use_aux_loss > 0 and self.training:
             # Hard-Mine N extra embeddings #
             false_hard_mine = torch.randint(low=0, high=6369, size=(o.size()[0], self.use_aux_loss), device='cuda')
@@ -242,7 +277,9 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
             fake_scores = fake_scores.sum(2)
             scores = torch.cat([score_0, score_1, score_2, fake_scores], dim=1)
         else:
+            #############################################
             scores = torch.cat([score_0, score_1, score_2], dim=1)
+            #############################################
         if gt_answer_int is not None:
             loss = self.calc_loss(scores, gt_answer_int)
             metric = self.calc_acc(scores[:, :3], gt_answer_int)
@@ -333,7 +370,7 @@ class IterableLookUpV2(Dataset):
                     #                              active_entry['metadata']['video_id'].split('_')[1]) + '_sent.npy'
                     answer_file = os.path.join(self.qo_folders[0][1],
                                                active_entry['metadata']['video_id'].split('_')[1]) + '_sent.npy'
-                    #question_feat = torch.from_numpy(np.load(question_file)).float()
+                    # question_feat = torch.from_numpy(np.load(question_file)).float()
                     active_option_frames = torch.from_numpy(np.load(answer_file)).float()
                 # Get YOUR GT ANSWER (if any) #
                 active_gt_frames = active_question_items['answer_id']
@@ -411,6 +448,9 @@ class SR_MCVQA_EMB:
                                                             use_aux_loss=use_aux_loss, top_k=top_k,
                                                             train_skip_self=train_skip_self)
         self.model.to(device='cuda')
+        #################################
+        self.freeze_retrieval_part()
+        #################################
         v = torch.zeros(1, 768).to('cuda')
         aud = torch.zeros(1, 768).to('cuda')
         ocr = torch.ones(1, 768).to('cuda')
@@ -433,8 +473,10 @@ class SR_MCVQA_EMB:
             self._cache_ds = self.build_video_answer_db_2(cache_ds)
         else:
             self._cache_ds = self.build_video_answer_db_2(active_ds)
-        self.qo_folders = self._active_ds.qo_folders
-        self.freeze_retrieval_part()
+        try:
+            self.qo_folders = active_ds.qo_folders
+        except:
+            self.qo_folders = cache_ds.qo_folders
 
     def build_video_answer_db_2(self, dataset) -> Dict[str, Any]:
         """Builds a Video / Audio Embedding - Answer database.
@@ -560,7 +602,7 @@ class SR_MCVQA_EMB:
         save_checkpoint({
             'state_dict': self.model.state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, f'SR_MCVQA_EMB_Model{self.model_version}')
+        }, f'SR_MCVQA_EMB_Model2{self.model_version}')
 
         # Freeze the video_model #
         self.model.eval()
@@ -577,7 +619,7 @@ class SR_MCVQA_EMB:
                                    cached_db=self._cache_ds,
                                    model_emb=self.embedding_transformer,
                                    answer_data_json=self.answer_data_json, use_embedding=self.use_embedding,
-                                   lfoh=self.lfoh)
+                                   lfoh=self.lfoh, qo_folders=self.qo_folders)
 
         dataloader = DataLoader(dataset=dataset,
                                 batch_size=FIXED_BATCH_SIZE,
@@ -641,18 +683,8 @@ class SR_MCVQA_EMB:
                  audio_frames=None,
                  ocr_frames=None,
                  option_frames=None,
-                 n_ids=None, use_embedding=False,
                  **args):
-        """
-            Answer a multiple choice question.
-            :param sample: Whether to sample or use argmax
-            :param top_k: Filter the top-k similar results
-            :param temp: Use temp when sampling
-        """
-
         stored_response = self._cache_ds[question['question']]
-        ### Rank answers based on incoming Frame ###
-
         if len(stored_response['video_emb'][0].size()) == 1:
             db_frames = torch.stack(stored_response['video_emb'], dim=0)
         elif len(stored_response['video_emb'][0].size()) == 2:
@@ -668,44 +700,28 @@ class SR_MCVQA_EMB:
             elif len(stored_response['ocr_emb'][0].size()) == 2:
                 ocrdb_frames = torch.cat(stored_response['ocr_emb'], dim=0)
         if option_frames is not None:
-            no_frames = stored_response['answer']
+            if len(stored_response['answer'][0].size()) == 1:
+                ansdb_frames = torch.stack(stored_response['answer'], dim=0)
+            elif len(stored_response['answer'][0].size()) == 2:
+                ansdb_frames = torch.cat(stored_response['answer'], dim=0)
 
         _frames = frames.unsqueeze(0).to('cuda')
         _audio_frames = audio_frames.unsqueeze(0).to('cuda')
         _ocr_frames = ocr_frames.to('cuda')
+        _option_frames = option_frames.unsqueeze(0).to('cuda')
         _db_frames = db_frames.unsqueeze(0).to('cuda')
         _audb_frames = audb_frames.unsqueeze(0).to('cuda')
         _ocrdb_frames = ocrdb_frames.unsqueeze(0).to('cuda')
-        ### Fix incoming frames ###
-        if not self.answer_data_json is None and option_frames is not None:
-            o_ = torch.LongTensor([self.answer_data_json[f]['int_index'] for f in option_frames])
-            if not self.use_embedding:
-                o_ = torch.nn.functional.one_hot(o_, num_classes=6370).unsqueeze(0)
-                o_ = o_.float()
-            else:
-                o_ = o_.unsqueeze(0)
-            o_ = o_.to('cuda')
-            ########
-            if not self.use_embedding:
-                _no_frames = torch.nn.functional.one_hot(torch.LongTensor([no_frames]), num_classes=6370)
-                _no_frames = _no_frames.float()
-            else:
-                _no_frames = torch.LongTensor([no_frames])
-            _no_frames = _no_frames.to('cuda')
-            ### Fix incoming masks ###
-            if n_ids is not None:
-                _n_ids = None
-        else:
-            print("FIX THIIIIIIS")
+        _ansdb_frames = ansdb_frames.unsqueeze(0).to('cuda')
         with torch.no_grad():
             _sim_scores, _, _ = self.model(
                 v=_frames,
                 aud=_audio_frames,
                 ocr=_ocr_frames,
-                o=o_,
+                o=_option_frames,
                 n_ids=None,
                 n_feats=_db_frames,
-                n_answ=_no_frames,
+                n_answ=_ansdb_frames,
                 n_auds=_audb_frames,
                 n_ocrs=_ocrdb_frames,
                 gt_answer_int=None)
@@ -714,12 +730,20 @@ class SR_MCVQA_EMB:
         answer = [stored_response['answer'][gg.argmax().item()]]
         return answer_id, answer
 
-    def load_weights(self, path):
+    def load_weights(self, path, part):
         data = torch.load(path)
-        self.model.load_state_dict(data['state_dict'])
+        if part == 1:
+            self.model.load_state_dict(data['state_dict'], strict=False)
+        elif part == 2:
+            keys = [d for d in data['state_dict'].keys() if 'option' not in d]
+            for d in keys:
+                data['state_dict'].pop(d)
+            self.model.load_state_dict(data['state_dict'], strict=False)
         self.model.eval()
 
     def freeze_retrieval_part(self):
         ### Freeze the retrieval mechanism ###
-
+        for param in self.model.named_parameters():
+            if 'similarity_suggestor' in param[0]:
+                param[1].requires_grad = False
         return

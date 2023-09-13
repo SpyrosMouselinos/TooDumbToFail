@@ -134,7 +134,7 @@ def extract_frames_and_audio_from_videos_fast(source_folder):
             indices = np.linspace(0, t - 2, NUM_SAMPLES)
             indices = np.clip(indices, 0, t - 2).astype(int)
             frames = avr.get_batch(indices).asnumpy()
-            for frame_index in indices:
+            for frame_index in range(len(indices)):
                 frame_filename = f"{video_basename}_frame{frame_index}.jpg"
                 frame_path = os.path.join(video_folder, frame_filename)
                 #skimage.io.imshow(frames[frame_index])

@@ -80,39 +80,52 @@ class TrainableSoftTopK(nn.Module):
                                               train_skip_self=train_skip_self)
 
     def forward(self, q1, k1, q2, k2, q3=None, k3=None, mask=None, **args):
-        vid_gate = torch.nn.functional.sigmoid(self.temp_vid)
-        aud_gate = torch.nn.functional.sigmoid(self.temp_aud)
-        ocr_gate = torch.nn.functional.sigmoid(self.temp_ocr)
+        vid_gate = torch.nn.functional.sigmoid(self.temp_vid) * 4
+        aud_gate = torch.nn.functional.sigmoid(self.temp_aud) * 4
+        ocr_gate = torch.nn.functional.sigmoid(self.temp_ocr) * 4
 
-        q1 = torch.nn.functional.normalize(q1, p=2, dim=-1)
-        k1 = torch.nn.functional.normalize(k1, p=2, dim=-1)
-        q2 = torch.nn.functional.normalize(q2, p=2, dim=-1)
-        k2 = torch.nn.functional.normalize(k2, p=2, dim=-1)
+        q1n = torch.nn.functional.normalize(q1, p=2, dim=-1)
+        k1n = torch.nn.functional.normalize(k1, p=2, dim=-1)
+        q2n = torch.nn.functional.normalize(q2, p=2, dim=-1)
+        k2n = torch.nn.functional.normalize(k2, p=2, dim=-1)
         ### Special Case for OCR ###
         if not (q3 is None):
-            q3 = torch.nn.functional.normalize(q3, p=2, dim=-1)
-            k3 = torch.nn.functional.normalize(k3, p=2, dim=-1)
+            q3n = torch.nn.functional.normalize(q3, p=2, dim=-1)
+            k3n = torch.nn.functional.normalize(k3, p=2, dim=-1)
             pass
 
-        # scores1 = torch.nn.functional.cosine_similarity(q1.unsqueeze(1), k1, dim=-1)
+        score_func_1 = torch.nn.functional.cosine_similarity(q1n.unsqueeze(1), k1n, dim=-1)
+        max_cossim = torch.max(score_func_1, dim=1)
+        max_cossim_val = max_cossim.values
+        max_cossim_pos = max_cossim.indices
         scores1, _, _ = self.retrieval_v(k1, q1)
-
-        if mask is not None:
+        if max_cossim_val >= 0.99:
+            mask = torch.ones_like(scores1)
+            mask[:, :, max_cossim_pos] = 0
             scores1 *= mask
         scores1 = torch.clip(scores1, 0, 1)
 
-        # scores2 = torch.nn.functional.cosine_similarity(q2.unsqueeze(1), k2, dim=-1)
+        score_func_2 = torch.nn.functional.cosine_similarity(q2n.unsqueeze(1), k2n, dim=-1)
+        max_cossim = torch.max(score_func_2, dim=1)
+        max_cossim_val = max_cossim.values
+        max_cossim_pos = max_cossim.indices
         scores2, _, _ = self.retrieval_a(k2, q2)
-        if mask is not None:
+        if max_cossim_val >= 0.99:
+            mask = torch.ones_like(scores2)
+            mask[:, :, max_cossim_pos] = 0
             scores2 *= mask
         scores2 = torch.clip(scores2, 0, 1)
 
         ### Special Case for OCR ###
         if not (q3 is None):
-            # scores3 = torch.nn.functional.cosine_similarity(q3.unsqueeze(1), k3, dim=-1)
+            score_func_3 = torch.nn.functional.cosine_similarity(q3n.unsqueeze(1), k3n, dim=-1)
+            max_cossim = torch.max(score_func_3, dim=1)
+            max_cossim_val = max_cossim.values
+            max_cossim_pos = max_cossim.indices
             scores3, _, _ = self.retrieval_o(k3, q3)
-
-            if mask is not None:
+            if max_cossim_val >= 0.99:
+                mask = torch.ones_like(scores3)
+                mask[:, :, max_cossim_pos] = 0
                 scores3 *= mask
             scores3 = torch.clip(scores3, 0, 1)
             ocr_part = scores3 * ocr_gate
@@ -175,34 +188,37 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
         else:
             self.o_dim = o_dim
         self.emb_dim = 768
+        self.clip_dim = 512
         # Common Dropout #
         self.common_dropout = nn.Dropout1d(p=self.common_dropout)
         # Common BLOCKS #
-        self.common_vision_base = nn.Identity()
+        self.common_vision_base = nn.Linear(self.emb_dim, 128)
         self.v_block = nn.Sequential(self.common_vision_base)
         self.v_block2 = nn.Sequential(self.common_vision_base, self.common_dropout)
 
-        self.common_audio_base = nn.Identity()
+        self.common_audio_base = nn.Linear(self.emb_dim, 128)
         self.a_block = nn.Sequential(self.common_audio_base)
         self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
 
-        self.common_ocr_base = nn.Identity()
+        self.common_ocr_base = nn.Linear(self.emb_dim, 128)
         self.ocr_block = nn.Sequential(self.common_ocr_base)
         self.ocr_block2 = nn.Sequential(self.common_ocr_base, self.common_dropout)
 
         if not self.use_embedding:
-            self.common_option_base = nn.Identity()
+            self.common_option_base = nn.Linear(self.clip_dim, 128)
             self.o_block = nn.Sequential(self.common_option_base)
             self.o_block2 = nn.Sequential(self.common_option_base, self.common_dropout)
         else:
             self.embedding_library = nn.Embedding(num_embeddings=6370, embedding_dim=self.emb_dim)
 
-        self.similarity_suggestor = TrainableSoftTopK(hidden_state_size=self.emb_dim, top_k=top_k,
+        self.similarity_suggestor = TrainableSoftTopK(hidden_state_size=128, top_k=top_k,
                                                       train_skip_self=train_skip_self)
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
         #############################################
-        self.option_reshape = nn.Sequential(nn.LayerNorm(512), nn.Tanh(), nn.Linear(512, 512), nn.LayerNorm(512))
+        self.similarity_conditioning = nn.Sequential(nn.Linear(4, 20), nn.ReLU(), nn.Linear(20, 1))
+        self.late_fusion = nn.Sequential(nn.Linear(3 * 128, 128), nn.ReLU(), nn.Linear(128, 128))
+        self.option_reshape = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 128), nn.LayerNorm(128))
         self.option_head = OptionHead(mode='cos')
 
     def calc_loss(self, scores, gt):
@@ -236,7 +252,7 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
             scores = scores.squeeze(1)
         return self.metric_fn(scores, gt)
 
-    def forward(self, v, n_feats, aud, n_auds, ocr, n_ocrs, o, n_answ, gt_answer_int=None, **args):
+    def forward(self, v, n_feats, aud, n_auds, ocr, n_ocrs, o, n_answ, q=None, gt_answer_int=None, **args):
         v = self.v_block(v)
         v2 = self.v_block2(n_feats)
         aud = self.a_block(aud)
@@ -244,6 +260,7 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
         if not self.use_embedding:
             o = self.o_block(o)
             o2 = self.o_block2(n_answ)
+            q = self.o_block(q).squeeze(1)
         else:
             o = self.embedding_library(o)
             o2 = self.embedding_library(n_answ)
@@ -253,18 +270,28 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
             ocr = self.ocr_block(ocr)
             ocr2 = self.ocr_block2(n_ocrs)
         else:
-            ocr = None
-            ocr2 = None
-        mix_informed_answer = self.similarity_suggestor(v, v2, aud, aud2, ocr, ocr2)
+            ocr = torch.zeros_like(aud)
+            ocr2 = torch.zeros_like(aud2)
+        mix_weights = self.similarity_suggestor(v, v2, aud, aud2, ocr, ocr2)
+        weight_sum = torch.sum(mix_weights.squeeze(2), dim=1).detach()
+        weight_max = torch.max(mix_weights.squeeze(2), dim=1).values.detach()
+        weight_mean = torch.mean(mix_weights.squeeze(2), dim=1).detach()
+        weight_min = torch.min(mix_weights.squeeze(2), dim=1).values.detach()
+        a = self.similarity_conditioning(torch.stack([weight_sum, weight_max, weight_mean, weight_min], dim=1))
+        sa = torch.nn.functional.sigmoid(a)
         #############################################
-        options_informed_answer = mix_informed_answer * o2
-        options_informed_answer = options_informed_answer.sum(1)
+        options_informed_answer = mix_weights * o2
+        options_informed_answer = options_informed_answer.mean(1)
         #############################################
-        options_informed_answer = self.option_reshape(options_informed_answer)
+        self_informed_answer = torch.cat([v, aud, q], dim=1)
+        self_informed_answer = self.late_fusion(self_informed_answer)
         #############################################
-        score_0 = self.option_head(options_informed_answer, o[:, 0, :])
-        score_1 = self.option_head(options_informed_answer, o[:, 1, :])
-        score_2 = self.option_head(options_informed_answer, o[:, 2, :])
+        full_informed_answer = sa * options_informed_answer + (1 - sa) * self_informed_answer
+        full_informed_answer = self.option_reshape(full_informed_answer)
+        #############################################
+        score_0 = self.option_head(full_informed_answer, o[:, 0, :])
+        score_1 = self.option_head(full_informed_answer, o[:, 1, :])
+        score_2 = self.option_head(full_informed_answer, o[:, 2, :])
         #############################################
 
         if self.use_aux_loss > 0 and self.training:
@@ -303,7 +330,6 @@ class IterableLookUpV2(Dataset):
             cached_db = active_db
         self.qo_folders = qo_folders
         self.reorder_db(active_db, cached_db)
-
         return
 
     def custom_collate_fn(self, batch):
@@ -366,11 +392,11 @@ class IterableLookUpV2(Dataset):
                         [self.answer_data_json[f]['int_index'] for f in active_option_frames])
                 elif self.answer_data_json is None and self.lfoh is False:
                     ### Find and load the active Options ###
-                    # question_file = os.path.join(self.qo_folders[0][0],
-                    #                              active_entry['metadata']['video_id'].split('_')[1]) + '_sent.npy'
+                    question_file = os.path.join(self.qo_folders[0][0],
+                                                 active_entry['metadata']['video_id'].split('_')[1]) + '_sent.npy'
                     answer_file = os.path.join(self.qo_folders[0][1],
                                                active_entry['metadata']['video_id'].split('_')[1]) + '_sent.npy'
-                    # question_feat = torch.from_numpy(np.load(question_file)).float()
+                    question_frames = torch.from_numpy(np.load(question_file)).float()
                     active_option_frames = torch.from_numpy(np.load(answer_file)).float()
                 # Get YOUR GT ANSWER (if any) #
                 active_gt_frames = active_question_items['answer_id']
@@ -406,6 +432,7 @@ class IterableLookUpV2(Dataset):
                     'aud': active_audio_frames.squeeze(0),
                     'ocr': active_ocr_frames.squeeze(0),
                     'q': active_question_items['question'],
+                    'question_emb': question_frames,
                     'o': active_option_frames,
                     'n_feats': top_k_video_frames,
                     'n_auds': top_k_audio_frames,
@@ -449,7 +476,7 @@ class SR_MCVQA_EMB:
                                                             train_skip_self=train_skip_self)
         self.model.to(device='cuda')
         #################################
-        self.freeze_retrieval_part()
+        # self.freeze_retrieval_part()
         #################################
         v = torch.zeros(1, 768).to('cuda')
         aud = torch.zeros(1, 768).to('cuda')
@@ -467,8 +494,10 @@ class SR_MCVQA_EMB:
         n_feats = torch.zeros(1, 25, 768).to('cuda')
         n_auds = torch.zeros(1, 25, 768).to('cuda')
         n_ocrs = torch.ones(1, 25, 768).to('cuda')
-        pms.summary(self.model, v, n_feats, aud, n_auds, ocr, n_ocrs, o, n_answ, show_input=True, print_summary=True)
-        self._active_ds = copy.deepcopy(active_ds) if active_ds is not None else None
+        q = torch.ones(1, 512).to('cuda')
+        pms.summary(self.model, v, n_feats, aud, n_auds, ocr, n_ocrs, o, n_answ, q, show_input=True, print_summary=True)
+        # self._active_ds = copy.deepcopy(active_ds) if active_ds is not None else None
+        self._active_ds = active_ds
         if cache_ds is not None:
             self._cache_ds = self.build_video_answer_db_2(cache_ds)
         else:
@@ -508,7 +537,7 @@ class SR_MCVQA_EMB:
                     question_db[question['question']]
                 except KeyError:
                     question_db[question['question']] = {'video_emb': [], 'audio_emb': [], 'ocr_emb': [], 'answer': [],
-                                                         'answer_int': [], 'options': []}
+                                                         'answer_int': [], 'options': [], 'question_emb': []}
 
                 if self.lfoh:
                     answer = self.answer_data_json[question['options'][question['answer_id']]]['int_index']
@@ -519,6 +548,7 @@ class SR_MCVQA_EMB:
                 video_emb = entry['frames'].cpu()
                 audio_emb = entry['audio'].cpu()
                 ocr_emb = entry['ocr'].cpu()
+                q_emb = entry['clip_q_frames'].cpu()
 
                 if self.lfoh:
                     options = [self.answer_data_json[f]['int_index'] for f in question['options']]
@@ -530,6 +560,7 @@ class SR_MCVQA_EMB:
                 question_db[question['question']]['answer'].append(answer)
                 question_db[question['question']]['answer_int'].append(answer_int)
                 question_db[question['question']]['options'].append(options)
+                question_db[question['question']]['question_emb'].append(q_emb)
 
         return question_db
 
@@ -548,7 +579,7 @@ class SR_MCVQA_EMB:
                                 pin_memory=False,
                                 collate_fn=dataset.custom_collate_fn)
 
-        optimizer = torch.optim.AdamW(params=self.model.parameters(), lr=lr)
+        optimizer = torch.optim.Adam(params=self.model.parameters(), lr=lr)
         optimizer.zero_grad()
 
         for epoch_idx in range(epochs):
@@ -564,6 +595,7 @@ class SR_MCVQA_EMB:
                     n_answ, \
                     n_auds, \
                     n_ocrs, \
+                    q, \
                     gt_answer_int = batch['v'], \
                     batch['aud'], \
                     batch['ocr'], \
@@ -572,6 +604,7 @@ class SR_MCVQA_EMB:
                     batch['n_answers'], \
                     batch['n_auds'], \
                     batch['n_ocrs'], \
+                    batch['question_emb'], \
                     batch['gt_answer_int']
                 _, loss, metric = self.model(v=v,
                                              aud=aud,
@@ -582,7 +615,7 @@ class SR_MCVQA_EMB:
                                              n_answ=n_answ,
                                              n_auds=n_auds,
                                              n_ocrs=n_ocrs,
-                                             gt_answer_int=gt_answer_int)
+                                             gt_answer_int=gt_answer_int, q=q)
 
                 epoch_loss += loss.detach().item()
                 epoch_metric += metric.detach().item()
@@ -602,7 +635,7 @@ class SR_MCVQA_EMB:
         save_checkpoint({
             'state_dict': self.model.state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, f'SR_MCVQA_EMB_Model2{self.model_version}')
+        }, f'SR_MCVQA_EMB_Model_SKIPSELF{self.model_version}')
 
         # Freeze the video_model #
         self.model.eval()
@@ -638,14 +671,14 @@ class SR_MCVQA_EMB:
                     n_feats, \
                     n_answ, \
                     n_auds, \
-                    n_ocrs = batch['v'], \
+                    n_ocrs, q = batch['v'], \
                     batch['aud'], \
                     batch['ocr'], \
                     batch['o'], \
                     batch['n_feats'], \
                     batch['n_answers'], \
                     batch['n_auds'], \
-                    batch['n_ocrs']
+                    batch['n_ocrs'], batch['question_emb']
                 _sim_scores, _, _ = self.model(v=v,
                                                aud=aud,
                                                ocr=ocr,
@@ -675,7 +708,7 @@ class SR_MCVQA_EMB:
                 correct += 1
             total += 1
         print(f"[Validation Results]: Correct: {correct}  / Total: {total} / Acc: {correct / total}")
-        return
+        return correct / total
 
     def answer_q(self,
                  frames,
@@ -683,6 +716,7 @@ class SR_MCVQA_EMB:
                  audio_frames=None,
                  ocr_frames=None,
                  option_frames=None,
+                 question_frames=None,
                  **args):
         stored_response = self._cache_ds[question['question']]
         if len(stored_response['video_emb'][0].size()) == 1:
@@ -709,6 +743,7 @@ class SR_MCVQA_EMB:
         _audio_frames = audio_frames.unsqueeze(0).to('cuda')
         _ocr_frames = ocr_frames.to('cuda')
         _option_frames = option_frames.unsqueeze(0).to('cuda')
+        _question_frames = question_frames.unsqueeze(0).to('cuda')
         _db_frames = db_frames.unsqueeze(0).to('cuda')
         _audb_frames = audb_frames.unsqueeze(0).to('cuda')
         _ocrdb_frames = ocrdb_frames.unsqueeze(0).to('cuda')
@@ -724,6 +759,7 @@ class SR_MCVQA_EMB:
                 n_answ=_ansdb_frames,
                 n_auds=_audb_frames,
                 n_ocrs=_ocrdb_frames,
+                q=_question_frames,
                 gt_answer_int=None)
         gg = _sim_scores.squeeze()
         answer_id = [gg.argmax().item()]

@@ -4,8 +4,8 @@ import numpy as np
 import json
 import ast
 
-from pstp_net.feat_script.clip import load as clip_load
-from pstp_net.feat_script.clip import tokenize as clip_tokenize
+from clip import load as clip_load
+from clip import tokenize as clip_tokenize
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(device)
 model, preprocess = clip_load("ViT-B/32", device=device)

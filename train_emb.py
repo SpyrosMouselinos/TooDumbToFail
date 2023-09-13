@@ -30,18 +30,16 @@ valid_cfg = {'video_folder': './data/valid/',
              'use_qo': True,
              }
 val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
-for k in [8, 9, 10, 11, 12]:
-    model = SR_MCVQA_EMB(active_ds=val_mc_vqa_dataset,
-                         cache_ds=train_mc_vqa_dataset,
-                         look_for_one_hot=False,
-                         use_embedding=False,
-                         use_aux_loss=0,
-                         model_version=5,
-                         top_k=k,
-                         train_skip_self=True, common_dropout=0)
-    model.load_weights(path='SR_MCVQA_Model5.pth', part=1)
-    model.load_weights(path='SR_MCVQA_EMB_Model25.pth', part=2)
-    model.model.eval()
-    print(f"Using K: {k}")
-    model.eval()
-    print("##################################")
+model = SR_MCVQA_EMB(active_ds=train_mc_vqa_dataset,
+                     cache_ds=train_mc_vqa_dataset,
+                     look_for_one_hot=False,
+                     use_embedding=False,
+                     use_aux_loss=0,
+                     model_version=5,
+                     top_k=10,
+                     train_skip_self=True)
+
+for i in range(100):
+    model.fit(lr=0.001, bs=32, epochs=10)
+    if i % 2 == 1:
+        model.eval(val_dataset=val_mc_vqa_dataset)

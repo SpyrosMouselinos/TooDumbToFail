@@ -32,18 +32,18 @@ valid_cfg = {'video_folder': './data/valid/',
              'use_qo': True,
              }
 val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
-
+val_mc_vqa_dataset.union(train_mc_vqa_dataset)
 model = SR_MCVQA_EMB(active_ds=None,
-                     cache_ds=train_mc_vqa_dataset,
+                     cache_ds=val_mc_vqa_dataset,
                      look_for_one_hot=False,
                      use_embedding=False,
                      use_aux_loss=0,
                      model_version=5,
-                     top_k=11,
-                     train_skip_self=True, common_dropout=0)
-model.load_weights(path='SR_MCVQA_Model5.pth', part=1)
-model.load_weights(path='SR_MCVQA_EMB_Model25.pth', part=2)
+                     top_k=10,
+                     train_skip_self=True)
+model.load_weights(path='SR_MCVQA_EMB_Model_SKIPSELF5.pth', part=1)
 model.model.eval()
+
 
 results = {}
 test_results = []
@@ -51,7 +51,7 @@ test_results_dict = {k: v for k, v in zip(CAT, np.zeros((len(CAT))))}
 global_idx = 0
 for run in range(test_runs):
     answers = {}
-
+    val_mc_vqa_dataset = PerceptionDataset(valid_db_dict, **valid_cfg)
     for video_item in tqdm.tqdm(val_mc_vqa_dataset):
         # for video_item in val_mc_vqa_dataset:
         video_id = video_item['metadata']['video_id']

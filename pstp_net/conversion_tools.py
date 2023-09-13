@@ -4,6 +4,7 @@ import shutil
 import cv2
 import decord as de
 import numpy as np
+import skimage.io
 
 ctx = de.cpu(0)
 
@@ -136,7 +137,8 @@ def extract_frames_and_audio_from_videos_fast(source_folder):
             for frame_index in indices:
                 frame_filename = f"{video_basename}_frame{frame_index}.jpg"
                 frame_path = os.path.join(video_folder, frame_filename)
-                np.save(frame_path, frames)
+                #skimage.io.imshow(frames[frame_index])
+                skimage.io.imsave(frame_path, frames[frame_index])
             print(f"Extracted frames  from '{video_name}' to '{video_folder}'.")
 
     print("Frame extraction completed.")

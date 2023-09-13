@@ -24,9 +24,19 @@ def train(args, model, train_loader, optimizer, writer, epoch, scaler=None):
     running_train_loss = 0
     running_train_acc = 0
     for batch_idx, sample in enumerate(train_loader):
-        audios_feat = sample['audios_feat'].to('cuda')
-        ocr_feat = sample['ocr_feat'].to('cuda')
-        video_feat = sample['video_feat'].to('cuda')
+        if 'audios_feat' in sample:
+            audios_feat = sample['audios_feat'].to('cuda')
+        else:
+            audios_feat = None
+        if 'ocr_feat' in sample:
+            ocr_feat = sample['ocr_feat'].to('cuda')
+        else:
+            ocr_feat = None
+        if 'video_feat' in sample:
+            video_feat = sample['video_feat'].to('cuda')
+        else:
+            video_feat = None
+
         visual_feat = sample['visual_feat'].to('cuda')
         patch_feat = sample['patch_feat'].to('cuda')
         question = sample['question'].to('cuda').unsqueeze(1)
@@ -34,21 +44,31 @@ def train(args, model, train_loader, optimizer, writer, epoch, scaler=None):
         options_feat = sample['options_feat'].to('cuda')
         answer_label = sample['answer_label'].to('cuda')
 
-
         optimizer.zero_grad()
         if scaler is not None:
             with autocast(dtype=torch.float16):
-                output_qa, loss, metric = model(audio=audios_feat, visual=visual_feat, patch=patch_feat,
+                output_qa, loss, metric = model(audio=audios_feat,
+                                                visual=visual_feat,
+                                                patch=patch_feat,
                                                 video=video_feat,
-                                                ocr=ocr_feat, question=question, qst_word=qst_word,
-                                                options=options_feat, answer=answer_label)
+                                                ocr=ocr_feat,
+                                                question=question,
+                                                qst_word=qst_word,
+                                                options=options_feat,
+                                                answer=answer_label)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            output_qa, loss, metric = model(audio=audios_feat, visual=visual_feat, patch=patch_feat, video=video_feat,
-                                            ocr=ocr_feat, question=question, qst_word=qst_word,
-                                            options=options_feat, answer=answer_label)
+            output_qa, loss, metric = model(audio=audios_feat,
+                                            visual=visual_feat,
+                                            patch=patch_feat,
+                                            video=video_feat,
+                                            ocr=ocr_feat,
+                                            question=question,
+                                            qst_word=qst_word,
+                                            options=options_feat,
+                                            answer=answer_label)
             loss.backward()
             optimizer.step()
 
@@ -73,9 +93,18 @@ def eval(model, val_loader, writer, epoch, scaler=None):
 
     with torch.no_grad():
         for batch_idx, sample in enumerate(val_loader):
-            audios_feat = sample['audios_feat'].to('cuda')
-            ocr_feat = sample['ocr_feat'].to('cuda')
-            video_feat = sample['video_feat'].to('cuda')
+            if 'audios_feat' in sample:
+                audios_feat = sample['audios_feat'].to('cuda')
+            else:
+                audios_feat = None
+            if 'ocr_feat' in sample:
+                ocr_feat = sample['ocr_feat'].to('cuda')
+            else:
+                ocr_feat = None
+            if 'video_feat' in sample:
+                video_feat = sample['video_feat'].to('cuda')
+            else:
+                video_feat = None
             visual_feat = sample['visual_feat'].to('cuda')
             patch_feat = sample['patch_feat'].to('cuda')
             question = sample['question'].to('cuda')
@@ -85,15 +114,25 @@ def eval(model, val_loader, writer, epoch, scaler=None):
 
             if scaler is not None:
                 with autocast(dtype=torch.float16):
-                    _, loss, metric = model(audio=audios_feat, visual=visual_feat, patch=patch_feat,
+                    _, loss, metric = model(audio=audios_feat,
+                                            visual=visual_feat,
+                                            patch=patch_feat,
                                             video=video_feat,
-                                            ocr=ocr_feat, question=question, qst_word=qst_word,
-                                            options=options_feat, answer=answer_label)
+                                            ocr=ocr_feat,
+                                            question=question,
+                                            qst_word=qst_word,
+                                            options=options_feat,
+                                            answer=answer_label)
             else:
-                _, loss, metric = model(audio=audios_feat, visual=visual_feat, patch=patch_feat,
+                _, loss, metric = model(audio=audios_feat,
+                                        visual=visual_feat,
+                                        patch=patch_feat,
                                         video=video_feat,
-                                        ocr=ocr_feat, question=question, qst_word=qst_word,
-                                        options=options_feat, answer=answer_label)
+                                        ocr=ocr_feat,
+                                        question=question,
+                                        qst_word=qst_word,
+                                        options=options_feat,
+                                        answer=answer_label)
 
             total_examples += 1
             total_loss += loss.item()
@@ -172,8 +211,7 @@ def main():
                                          clip_word_ans_dir=args.clip_word_ans_dir,  # Path to CLIP Answer feats
                                          transform=transforms.Compose([ToTensor()]),
                                          mode_flag='valid')
-    # TODO: CHANGE THIS
-    #print("You train on val and val on train!")
+
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                               pin_memory=False)
 

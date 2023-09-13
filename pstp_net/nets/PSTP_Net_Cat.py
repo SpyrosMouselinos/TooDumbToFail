@@ -364,11 +364,13 @@ class Cataphract(nn.Module):
         super(Cataphract, self).__init__()
         self.args = args
         self.num_layers = args.num_layers  # Layers = 1
-        self.fc_a = nn.Linear(768, hidden_size)
-        self.fc_v = nn.Linear(512, hidden_size)
-        self.fc_p = nn.Linear(768, hidden_size)
+        self.fc_aud = nn.Linear(768, hidden_size)
         self.fc_vid = nn.Linear(768, hidden_size)
         self.fc_ocr = nn.Linear(768, hidden_size)
+
+        self.fc_v = nn.Linear(512, hidden_size)
+        self.fc_p = nn.Linear(768, hidden_size)
+
         self.fc_q = nn.Linear(512, hidden_size)
         self.fc_o = nn.Linear(512, hidden_size)
         self.fc_w = nn.Linear(512, hidden_size)
@@ -402,9 +404,15 @@ class Cataphract(nn.Module):
         self.fc_answer_pred = nn.Linear(512, 512)
 
     def forward(self, audio, visual, patch, video, ocr, question, qst_word, options, answer=None):
+        if audio is not None:
+            audio_feat = self.fc_aud(audio)
+        if video is not None:
+            video_feat = self.fc_vid(video)
+        if ocr is not None:
+            ocr_feat = self.fc_ocr(ocr)
+
         visual_feat = self.fc_v(visual)
         patch_feat = self.fc_p(patch)
-        video_feat = self.fc_vid(video)
         cls = self.cls.repeat(visual_feat.size()[0], 1, 1)
         qst_feat = self.fc_q(question).squeeze(-2)
         word_feat = self.fc_w(qst_word).squeeze(-3)
@@ -420,7 +428,7 @@ class Cataphract(nn.Module):
         top_km_patches = top_km_patches.view(-1, self.args.top_k * self.args.top_m, 512)
         ### Step 5. Fusion module ###
         av_fusion_feat = torch.cat(
-            (cls, top_km_patches, word_feat, video_feat.unsqueeze(1)), dim=1)
+            (cls, top_km_patches, word_feat), dim=1)
         av_fusion_feat = self.ST(av_fusion_feat)
         av_fusion_feat = av_fusion_feat[:, 0:self.cls_n, :].mean(-2)
         avq_feat = torch.mul(av_fusion_feat, qst_feat)

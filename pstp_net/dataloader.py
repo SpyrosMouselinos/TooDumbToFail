@@ -174,9 +174,18 @@ class PerceptionAVQA_dataset(Dataset):
         question_id = sample['question_id']
         answer = sample['answer_id']
 
-        audios_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_audioseg_1.pkl'))
-        ocr_feat = pickle_load(os.path.join(self.ocr_feat_dir, name + '_ocrseg_1.pkl'))['ocr'][0]
-        video_feat = pickle_load(os.path.join(self.video_feat_dir, name + '_seg_1.pkl'))
+        if self.audios_feat_dir is not None:
+            audios_feat = pickle_load(os.path.join(self.audios_feat_dir, name + '_audioseg_1.pkl'))
+        else:
+            audios_feat = None
+        if self.ocr_feat_dir is not None:
+            ocr_feat = pickle_load(os.path.join(self.ocr_feat_dir, name + '_ocrseg_1.pkl'))['ocr'][0]
+        else:
+            ocr_feat = None
+        if self.video_feat_dir is not None:
+            video_feat = pickle_load(os.path.join(self.video_feat_dir, name + '_seg_1.pkl'))
+        else:
+            video_feat = None
 
         visual_CLIP_feat = np.load(os.path.join(self.clip_vit_b32_dir, name + '_image_feats.npy'))
         needs_pad = visual_CLIP_feat.shape[0]
@@ -229,11 +238,7 @@ class ToTensor(object):
         answer_feat = sample['answer_feat']
         question_id = sample['question_id']
 
-
         batch = {
-            'audios_feat': audios_feat.float(),
-            'ocr_feat': ocr_feat.float(),
-            'video_feat': video_feat.float(),
             'visual_feat': torch.from_numpy(visual_feat).float(),
             'patch_feat': torch.from_numpy(patch_feat).float(),
             'question': torch.from_numpy(question[0]).float(),
@@ -241,9 +246,10 @@ class ToTensor(object):
             'options_feat': torch.from_numpy(options_feat).float(),
             'answer_label': torch.LongTensor([answer_feat])
         }
-
-
-
+        if audios_feat is not None:
+            batch.update({'audios_feat': audios_feat.float()})
+        if ocr_feat is not None:
+            batch.update({'ocr_feat': ocr_feat.float()})
+        if video_feat is not None:
+            batch.update({'video_feat': video_feat.float()})
         return batch
-        # 'video_name': video_name,
-        # 'question_id': question_id

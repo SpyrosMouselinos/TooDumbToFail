@@ -10,11 +10,11 @@ parser = argparse.ArgumentParser(description='PyTorch Implementation of OCR-Audi
 base_path = "/home/spyros/Desktop/TooDumbToFail/data/"
 server_path = "/home/spyros/Desktop/TooDumbToFail/data/PERCEPTION"
 
-parser.add_argument("--audios_feat_dir", type=str, default=os.path.join(server_path, 'audio_frames'),
+parser.add_argument("--audios_feat_dir", type=str, default=None,
                     help="audio feat dir")
-parser.add_argument("--ocr_feat_dir", type=str, default=os.path.join(server_path, 'ocr_frames'),
+parser.add_argument("--ocr_feat_dir", type=str, default=None,
                     help="audio feat dir")
-parser.add_argument("--video_feat_dir", type=str, default=os.path.join(server_path, 'video_frames'),
+parser.add_argument("--video_feat_dir", type=str, default=None,
                     help="audio feat dir")
 parser.add_argument("--clip_vit_b32_dir", type=str, default=os.path.join(server_path, 'clip_vit_b32'),
                     help="clip_vit-b32_dir")
@@ -84,7 +84,7 @@ parser.add_argument('--seed', type=int, default=1, metavar='S',
 ### ======================== Save Configs ==========================
 parser.add_argument( "--checkpoint", type=str, default='Test_No_Vid',
                     help="save model name")
-parser.add_argument("--model_save_dir", type=str, default='/home/spyros/Desktop/TooDumbToFail/pstp_net/runs/models_pstp_cat/',
+parser.add_argument("--model_save_dir", type=str, default='./runs/models_pstp_cat/',
                     help="model save dir")
 parser.add_argument("--mode", type=str, default='train',
                     help="with mode to use")

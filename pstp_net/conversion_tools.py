@@ -114,11 +114,11 @@ def extract_frames_and_audio_from_videos_fast(source_folder):
 
         # Iterate over video files in the subfolder
         for video_name in os.listdir(subfolder_path):
-            video_path = os.path.join(subfolder_path, video_name + '.mp4')
+            video_path = os.path.join(subfolder_path, video_name)
 
             # Check if the current item is a file and has a video extension
             if not os.path.isfile(video_path):
-                pass
+                continue
 
             video_basename, video_extension = os.path.splitext(video_name)
 

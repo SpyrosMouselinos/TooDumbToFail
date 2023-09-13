@@ -2,6 +2,10 @@
 import os
 import shutil
 import cv2
+import decord as de
+import numpy as np
+
+ctx = de.cpu(0)
 
 
 def organize_videos(source_folder):
@@ -93,8 +97,52 @@ def extract_frames_from_videos(source_folder):
     print("Frame extraction completed.")
 
 
+def extract_frames_and_audio_from_videos_fast(source_folder):
+    # Ensure the source folder exists
+    if not os.path.exists(source_folder):
+        print(f"Source folder '{source_folder}' does not exist.")
+        return
+
+    NUM_SAMPLES = 60
+    # Iterate over subfolders (assumed to be folders containing videos)
+    for subfolder_name in os.listdir(source_folder):
+        subfolder_path = os.path.join(source_folder, subfolder_name)
+
+        if not os.path.isdir(subfolder_path):
+            continue
+
+        # Iterate over video files in the subfolder
+        for video_name in os.listdir(subfolder_path):
+            video_path = os.path.join(subfolder_path, video_name + '.mp4')
+
+            # Check if the current item is a file and has a video extension
+            if not os.path.isfile(video_path):
+                pass
+
+            video_basename, video_extension = os.path.splitext(video_name)
+
+            video_folder = os.path.join(subfolder_path, video_basename)
+            os.makedirs(video_folder, exist_ok=True)
+
+            # Open and extract Images #
+            # avr = de.AVReader(uri=video_path, ctx=ctx, sample_rate=16_000, mono=True, width=332, height=332,
+            #                   num_threads=0)
+            avr = de.VideoReader(uri=video_path, ctx=ctx, width=332, height=332,
+                                 num_threads=0)
+            t = len(avr)
+            indices = np.linspace(0, t - 2, NUM_SAMPLES)
+            indices = np.clip(indices, 0, t - 2).astype(int)
+            frames = avr.get_batch(indices).asnumpy()
+            for frame_index in indices:
+                frame_filename = f"{video_basename}_frame{frame_index}.jpg"
+                frame_path = os.path.join(video_folder, frame_filename)
+                np.save(frame_path, frames)
+            print(f"Extracted frames  from '{video_name}' to '{video_folder}'.")
+
+    print("Frame extraction completed.")
+
 
 if __name__ == '__main__':
     dir_fps_path = '../data/PERCEPTION/avqa-frames-1fps'
     organize_videos(dir_fps_path)
-    extract_frames_from_videos(dir_fps_path)
+    extract_frames_and_audio_from_videos_fast(dir_fps_path)

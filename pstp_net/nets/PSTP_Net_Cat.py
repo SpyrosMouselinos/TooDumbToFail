@@ -237,6 +237,66 @@ class CrossModalTransformer(nn.Module):
         return modality_1, modality_2
 
 
+class TemporalFuser1d(nn.Module):
+    def __init__(self, time_dim_in):
+        super(TemporalFuser1d, self).__init__()
+        self.conv_time_average1 = nn.Conv1d(in_channels=time_dim_in, out_channels=3 * (time_dim_in // 4), kernel_size=1)
+        self.conv_time_average2 = nn.Conv1d(in_channels=3 * (time_dim_in // 4), out_channels=time_dim_in // 2,
+                                            kernel_size=1)
+        self.conv_time_average3 = nn.Conv1d(in_channels=time_dim_in // 2, out_channels=time_dim_in // 4, kernel_size=1)
+        self.conv_time_average4 = nn.Conv1d(in_channels=time_dim_in // 4, out_channels=1, kernel_size=1)
+        self.act = nn.ReLU()
+        self.dropout1 = nn.Dropout(p=0.1)
+        self.dropout2 = nn.Dropout(p=0.1)
+        self.dropout3 = nn.Dropout(p=0.1)
+
+    def forward(self, time_stacked_features):
+        x = time_stacked_features
+        x = self.conv_time_average1(x)
+        x = self.act(x)
+        x = self.dropout1(x)
+        x = self.conv_time_average2(x)
+        x = self.act(x)
+        x = self.dropout2(x)
+        x = self.conv_time_average3(x)
+        x = self.act(x)
+        x = self.dropout3(x)
+        x = self.conv_time_average4(x)
+        return x
+
+
+class TemporalFuser2d(nn.Module):
+    def __init__(self, time_dim_in, space_dim_in):
+        super(TemporalFuser2d, self).__init__()
+        self.conv_time_space_average1 = nn.Conv2d(in_channels=time_dim_in, out_channels=3 * (time_dim_in // 4),
+                                                  kernel_size=(space_dim_in // 16, 1))
+        self.conv_time_space_average2 = nn.Conv2d(in_channels=3 * (time_dim_in // 4), out_channels=time_dim_in // 2,
+                                                  kernel_size=(space_dim_in // 8, 1))
+        self.conv_time_space_average3 = nn.Conv2d(in_channels=time_dim_in // 2, out_channels=time_dim_in // 4,
+                                                  kernel_size=(space_dim_in // 4, 1))
+        self.conv_time_space_average4 = nn.Conv2d(in_channels=time_dim_in // 4, out_channels=1,
+                                                  kernel_size=(18, 1))
+        self.act = nn.ReLU()
+        self.dropout1 = nn.Dropout(p=0.1)
+        self.dropout2 = nn.Dropout(p=0.1)
+        self.dropout3 = nn.Dropout(p=0.1)
+
+    def forward(self, time_stacked_features):
+        x = time_stacked_features
+        x = self.conv_time_space_average1(x)
+        x = self.act(x)
+        x = self.dropout1(x)
+        x = self.conv_time_space_average2(x)
+        x = self.act(x)
+        x = self.dropout2(x)
+        x = self.conv_time_space_average3(x)
+        x = self.act(x)
+        x = self.dropout3(x)
+        x = self.conv_time_space_average4(x)
+        return x.squeeze(1)
+
+
+
 class TemporalSelection(nn.Module):
 
     def __init__(self, args):
@@ -344,12 +404,9 @@ class EmbSimHead(nn.Module):
         return self.metric_fn(scores, gt)
 
     def forward(self, suggested_answer, options, gt_answer):
-        score_0 = suggested_answer * options[:, 0, :]
-        score_0 = score_0.sum(1).unsqueeze(1)
-        score_1 = suggested_answer * options[:, 1, :]
-        score_1 = score_1.sum(1).unsqueeze(1)
-        score_2 = suggested_answer * options[:, 2, :]
-        score_2 = score_2.sum(1).unsqueeze(1)
+        score_0 = torch.nn.functional.cosine_similarity(suggested_answer, options[:, 0, :], dim=1).unsqueeze(1)
+        score_1 = torch.nn.functional.cosine_similarity(suggested_answer, options[:, 1, :], dim=1).unsqueeze(1)
+        score_2 = torch.nn.functional.cosine_similarity(suggested_answer, options[:, 2, :], dim=1).unsqueeze(1)
         scores = torch.cat([score_0, score_1, score_2], dim=1)
         if gt_answer is not None:
             loss = self.calc_loss(scores, gt_answer)
@@ -378,6 +435,8 @@ class Cataphract(nn.Module):
         # modules
         self.temporal_selector = TemporalSelection(args)
         self.spatial_selector = SpatialSelection(args)
+        self.smooth_time = TemporalFuser1d(60)
+        self.smooth_time_space = TemporalFuser2d(60, 25)
 
         self.CT1 = CrossModalTransformer(args,
                                          CrossBlock(d_model=512, nhead=1, dim_feedforward=512),
@@ -393,6 +452,8 @@ class Cataphract(nn.Module):
                                       Block(d_model=512, nhead=1, dim_feedforward=512),
                                       num_layers=self.num_layers)
 
+        self.ST_OG = nn.TransformerEncoderLayer(d_model=512, nhead=1, dim_feedforward=512, dropout=0.1, batch_first=True)
+
         self.time_encoder = PositionalEncoding1D(512)
         self.space_encoder = PositionalEncoding2D(512)
 
@@ -402,7 +463,7 @@ class Cataphract(nn.Module):
         self.cls_n = 4
         self.cls = nn.Parameter(data=torch.randn(size=(self.cls_n, hidden_size), device='cuda'), requires_grad=True)
         self.fc_answer_pred = nn.Linear(512, 512)
-
+        self.project_down = nn.Sequential(nn.Linear(250, 128), nn.ReLU(), nn.Linear(128, 1))
     def forward(self, audio, visual, patch, video, ocr, question, qst_word, options, answer=None):
         if audio is not None:
             audio_feat = self.fc_aud(audio)
@@ -413,25 +474,27 @@ class Cataphract(nn.Module):
 
         visual_feat = self.fc_v(visual)
         patch_feat = self.fc_p(patch)
-        cls = self.cls.repeat(visual_feat.size()[0], 1, 1)
+
+        #cls = self.cls.repeat(visual_feat.size()[0], 1, 1)
         qst_feat = self.fc_q(question).squeeze(-2)
-        word_feat = self.fc_w(qst_word).squeeze(-3)
+        #word_feat = self.fc_w(qst_word).squeeze(-3)
         options_feat = self.fc_o(options)
 
+
         ### Step 0: Time Space Encoding ###
-        visual_feat = self.normv(visual_feat + self.time_encoder(visual_feat))
-        patch_feat = self.normp(patch_feat + self.space_encoder(patch_feat))
+        #visual_feat = self.normv(visual_feat + self.time_encoder(visual_feat))
+        #patch_feat = self.normp(patch_feat + self.space_encoder(patch_feat))
         ### Step 1: Filter relevant frames ###
         _, top_k_patches = self.temporal_selector(query=visual_feat, key=qst_feat, value=patch_feat)
         ### Step 2: Filter relevant frame patches ###
         top_km_patches = self.spatial_selector(filtered_qv=top_k_patches, key=qst_feat)
-        top_km_patches = top_km_patches.view(-1, self.args.top_k * self.args.top_m, 512)
+        B, N, P, C = top_km_patches.size()
+
+        ### Fuse Global Representations ###
+        fused_global_patch_feats = top_km_patches.view(B, N*P, C).transpose(1, 2)
+        fused_global_patch_feats = self.project_down(fused_global_patch_feats).squeeze(2)
         ### Step 5. Fusion module ###
-        av_fusion_feat = torch.cat(
-            (cls, top_km_patches, word_feat), dim=1)
-        av_fusion_feat = self.ST(av_fusion_feat)
-        av_fusion_feat = av_fusion_feat[:, 0:self.cls_n, :].mean(-2)
-        avq_feat = torch.mul(av_fusion_feat, qst_feat)
+        avq_feat = torch.mul(fused_global_patch_feats, qst_feat)
         avq_feat = F.tanh(avq_feat)
         avq_feat = self.fc_answer_pred(avq_feat)
         ### 7. Answer prediction moudule *************************************************************

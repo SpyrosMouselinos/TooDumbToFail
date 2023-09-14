@@ -69,11 +69,11 @@ parser.add_argument("--num_layers", type=int, default=4, metavar='num_layers',
 
 
 ### ======================== Learning Configs ==========================
-parser.add_argument('--batch-size', type=int, default=64, metavar='N',
+parser.add_argument('--batch-size', type=int, default=8, metavar='N',
                     help='input batch size for training (default: 8)')
 parser.add_argument('--epochs', type=int, default=30, metavar='E',
                     help='number of epochs to train (default: 20)')
-parser.add_argument('--lr', type=float, default=1e-3, metavar='LR',
+parser.add_argument('--lr', type=float, default=5e-4, metavar='LR',
                     help='learning rate (default: 3e-4)')
 parser.add_argument('--eval_every', type=int, default=5, metavar='eval_every',
                     help='eval every epochs')

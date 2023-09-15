@@ -19,13 +19,29 @@ def save_checkpoint(state, filename='checkpoint'):
     torch.save(state, filename + '.pth')
 
 
+class SimAtt(nn.Module):
+    def __init__(self):
+        super(SimAtt, self).__init__()
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, query, key):
+        batch_size, output_len, dimensions = query.size()
+        query_len = key.size(1)
+        attention_scores = torch.bmm(query, key.transpose(1, 2).contiguous())
+        attention_scores = attention_scores.view(batch_size * output_len, query_len)
+        attention_weights = self.softmax(attention_scores)
+        attention_weights = attention_weights.view(batch_size, output_len, query_len)
+        return attention_weights
+
+
 class RetrievalSelection(nn.Module):
 
     def __init__(self, hidden_state_size, top_k, train_skip_self):
         super(RetrievalSelection, self).__init__()
         self.top_k = top_k
         self.train_skip_self = train_skip_self
-        self.attn_qst_query = nn.MultiheadAttention(hidden_state_size, 4, dropout=0.1)
+        self.attn_qst_query = SimAtt()
+        # self.attn_qst_query = nn.MultiheadAttention(hidden_state_size, 4, dropout=0.1)
 
     def topkfilter(self, score_vector, top_k_indices):
         top_k_indices = top_k_indices.squeeze(0)
@@ -36,10 +52,11 @@ class RetrievalSelection(nn.Module):
         return score_vector
 
     def soft_attention_select_2d(self, query_feat, kv_feat, mask):
-        kv_feat = kv_feat.permute(1, 0, 2)
+        # kv_feat = kv_feat.permute(1, 0, 2)
         query_feat = query_feat.unsqueeze(0)
-        _, temp_weights = self.attn_qst_query(query_feat, kv_feat, kv_feat,
-                                              attn_mask=mask, key_padding_mask=None)
+        # _, temp_weights = self.attn_qst_query(query_feat, kv_feat, kv_feat,
+        #                                       attn_mask=mask, key_padding_mask=None)
+        temp_weights = self.attn_qst_query(query_feat, kv_feat)
         return temp_weights
 
     def find_top_k_fast(self, temp_weights, modality):
@@ -80,9 +97,9 @@ class TrainableSoftTopK(nn.Module):
                                               train_skip_self=train_skip_self)
 
     def forward(self, q1, k1, q2, k2, q3=None, k3=None, mask=None, **args):
-        vid_gate = torch.nn.functional.sigmoid(self.temp_vid) * 4
-        aud_gate = torch.nn.functional.sigmoid(self.temp_aud) * 4
-        ocr_gate = torch.nn.functional.sigmoid(self.temp_ocr) * 4
+        vid_gate = torch.nn.functional.sigmoid(self.temp_vid)
+        aud_gate = torch.nn.functional.sigmoid(self.temp_aud)
+        ocr_gate = torch.nn.functional.sigmoid(self.temp_ocr)
 
         q1n = torch.nn.functional.normalize(q1, p=2, dim=-1)
         k1n = torch.nn.functional.normalize(k1, p=2, dim=-1)
@@ -98,10 +115,11 @@ class TrainableSoftTopK(nn.Module):
         max_cossim = torch.max(score_func_1, dim=1)
         max_cossim_val = max_cossim.values
         max_cossim_pos = max_cossim.indices
-        scores1, _, _ = self.retrieval_v(k1, q1)
+        # scores1, _, _ = self.retrieval_v(k1, q1)
+        scores1 = score_func_1
         if max_cossim_val >= 0.99:
             mask = torch.ones_like(scores1)
-            mask[:, :, max_cossim_pos] = 0
+            mask[:, max_cossim_pos] = 0
             scores1 *= mask
         scores1 = torch.clip(scores1, 0, 1)
 
@@ -109,10 +127,11 @@ class TrainableSoftTopK(nn.Module):
         max_cossim = torch.max(score_func_2, dim=1)
         max_cossim_val = max_cossim.values
         max_cossim_pos = max_cossim.indices
-        scores2, _, _ = self.retrieval_a(k2, q2)
+        # scores2, _, _ = self.retrieval_a(k2, q2)
+        scores2 = score_func_2
         if max_cossim_val >= 0.99:
             mask = torch.ones_like(scores2)
-            mask[:, :, max_cossim_pos] = 0
+            mask[:, max_cossim_pos] = 0
             scores2 *= mask
         scores2 = torch.clip(scores2, 0, 1)
 
@@ -122,10 +141,11 @@ class TrainableSoftTopK(nn.Module):
             max_cossim = torch.max(score_func_3, dim=1)
             max_cossim_val = max_cossim.values
             max_cossim_pos = max_cossim.indices
-            scores3, _, _ = self.retrieval_o(k3, q3)
+            # scores3, _, _ = self.retrieval_o(k3, q3)
+            scores3 = score_func_3
             if max_cossim_val >= 0.99:
                 mask = torch.ones_like(scores3)
-                mask[:, :, max_cossim_pos] = 0
+                mask[:, max_cossim_pos] = 0
                 scores3 *= mask
             scores3 = torch.clip(scores3, 0, 1)
             ocr_part = scores3 * ocr_gate
@@ -137,9 +157,7 @@ class TrainableSoftTopK(nn.Module):
         vid_part = scores1 * vid_gate
         aud_part = scores2 * aud_gate
         attention = vid_part + aud_part + ocr_part
-        B, L, C = attention.size()
-        attention = attention.contiguous().view(B, C, L)
-        return attention
+        return attention.unsqueeze(2)
 
 
 class OptionHead(nn.Module):
@@ -148,19 +166,24 @@ class OptionHead(nn.Module):
         self.mode = mode
         if self.mode == 'add':
             self.dropout = nn.Dropout(p=0.1)
-            self.linear = nn.Linear(512, 512)
-            self.act = nn.Tanh()
-            self.reduce = nn.Linear(512, 1)
+            self.linear = nn.Linear(6370, 128)
+            self.act = nn.ReLU()
+            self.reduce = nn.Linear(128, 1)
         elif self.mode == 'cos':
             pass
 
     def forward(self, answer, option, **args):
         if self.mode == 'add':
-            pass
+            pre_score = answer + option
+            pre_score = self.dropout(pre_score)
+            pre_score = self.linear(pre_score)
+            pre_score = self.act(pre_score)
+            score = self.reduce(pre_score)
         elif self.mode == 'cos':
-            score = answer * option
-            score = score.sum(1).unsqueeze(1)
-            return score
+            score = torch.nn.functional.cosine_similarity(answer, option).unsqueeze(1)
+        else:
+            pass
+        return score
 
 
 class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
@@ -187,38 +210,36 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
             self.o_dim = self.q_dim
         else:
             self.o_dim = o_dim
-        self.emb_dim = 768
+        self.emb_dim = 512
         self.clip_dim = 512
         # Common Dropout #
         self.common_dropout = nn.Dropout1d(p=self.common_dropout)
         # Common BLOCKS #
-        self.common_vision_base = nn.Linear(self.emb_dim, 128)
+        self.common_vision_base = nn.Identity()
         self.v_block = nn.Sequential(self.common_vision_base)
         self.v_block2 = nn.Sequential(self.common_vision_base, self.common_dropout)
 
-        self.common_audio_base = nn.Linear(self.emb_dim, 128)
+        self.common_audio_base = nn.Identity()
         self.a_block = nn.Sequential(self.common_audio_base)
         self.a_block2 = nn.Sequential(self.common_audio_base, self.common_dropout)
 
-        self.common_ocr_base = nn.Linear(self.emb_dim, 128)
+        self.common_ocr_base = nn.Identity()
         self.ocr_block = nn.Sequential(self.common_ocr_base)
         self.ocr_block2 = nn.Sequential(self.common_ocr_base, self.common_dropout)
 
         if not self.use_embedding:
-            self.common_option_base = nn.Linear(self.clip_dim, 128)
+            self.common_option_base = nn.Linear(512, 1024)
             self.o_block = nn.Sequential(self.common_option_base)
             self.o_block2 = nn.Sequential(self.common_option_base, self.common_dropout)
         else:
             self.embedding_library = nn.Embedding(num_embeddings=6370, embedding_dim=self.emb_dim)
 
-        self.similarity_suggestor = TrainableSoftTopK(hidden_state_size=128, top_k=top_k,
+        self.similarity_suggestor = TrainableSoftTopK(hidden_state_size=self.emb_dim, top_k=top_k,
                                                       train_skip_self=train_skip_self)
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
         #############################################
-        self.similarity_conditioning = nn.Sequential(nn.Linear(4, 20), nn.ReLU(), nn.Linear(20, 1))
-        self.late_fusion = nn.Sequential(nn.Linear(3 * 128, 128), nn.ReLU(), nn.Linear(128, 128))
-        self.option_reshape = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 128), nn.LayerNorm(128))
+        self.option_reshape = nn.Identity()
         self.option_head = OptionHead(mode='cos')
 
     def calc_loss(self, scores, gt):
@@ -260,7 +281,7 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
         if not self.use_embedding:
             o = self.o_block(o)
             o2 = self.o_block2(n_answ)
-            q = self.o_block(q).squeeze(1)
+            # q = self.o_block(q).squeeze(1)
         else:
             o = self.embedding_library(o)
             o2 = self.embedding_library(n_answ)
@@ -270,28 +291,18 @@ class MultiRetrievalAugmentedEmbeddingV5(nn.Module):
             ocr = self.ocr_block(ocr)
             ocr2 = self.ocr_block2(n_ocrs)
         else:
-            ocr = torch.zeros_like(aud)
-            ocr2 = torch.zeros_like(aud2)
-        mix_weights = self.similarity_suggestor(v, v2, aud, aud2, ocr, ocr2)
-        weight_sum = torch.sum(mix_weights.squeeze(2), dim=1).detach()
-        weight_max = torch.max(mix_weights.squeeze(2), dim=1).values.detach()
-        weight_mean = torch.mean(mix_weights.squeeze(2), dim=1).detach()
-        weight_min = torch.min(mix_weights.squeeze(2), dim=1).values.detach()
-        a = self.similarity_conditioning(torch.stack([weight_sum, weight_max, weight_mean, weight_min], dim=1))
-        sa = torch.nn.functional.sigmoid(a)
+            ocr = None
+            ocr2 = None
+        mix_informed_answer = self.similarity_suggestor(v, v2, aud, aud2, ocr, ocr2)
         #############################################
-        options_informed_answer = mix_weights * o2
-        options_informed_answer = options_informed_answer.mean(1)
+        options_informed_answer = mix_informed_answer * o2
+        options_informed_answer = options_informed_answer.sum(1)
         #############################################
-        self_informed_answer = torch.cat([v, aud, q], dim=1)
-        self_informed_answer = self.late_fusion(self_informed_answer)
+        options_informed_answer = self.option_reshape(options_informed_answer)
         #############################################
-        full_informed_answer = sa * options_informed_answer + (1 - sa) * self_informed_answer
-        full_informed_answer = self.option_reshape(full_informed_answer)
-        #############################################
-        score_0 = self.option_head(full_informed_answer, o[:, 0, :])
-        score_1 = self.option_head(full_informed_answer, o[:, 1, :])
-        score_2 = self.option_head(full_informed_answer, o[:, 2, :])
+        score_0 = self.option_head(options_informed_answer, o[:, 0, :])
+        score_1 = self.option_head(options_informed_answer, o[:, 1, :])
+        score_2 = self.option_head(options_informed_answer, o[:, 2, :])
         #############################################
 
         if self.use_aux_loss > 0 and self.training:
@@ -350,12 +361,17 @@ class IterableLookUpV2(Dataset):
                 elif isinstance(v, str):
                     forbidden_key = k
                     pass
+                elif v is None:
+                    continue
                 v = v.to('cuda') if not isinstance(v, str) else v
                 NEW_BATCH[k].append(v)
 
         for k in KEYS:
             if k != forbidden_key:
-                NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
+                try:
+                    NEW_BATCH[k] = torch.stack(NEW_BATCH[k], dim=0)
+                except:
+                    pass
         # Expand Options #
         if not self.use_embedding:
             if self.lfoh:
@@ -390,6 +406,7 @@ class IterableLookUpV2(Dataset):
                     active_option_frames = active_question_items['options']
                     active_option_frames = torch.LongTensor(
                         [self.answer_data_json[f]['int_index'] for f in active_option_frames])
+                    question_frames = None
                 elif self.answer_data_json is None and self.lfoh is False:
                     ### Find and load the active Options ###
                     question_file = os.path.join(self.qo_folders[0][0],
@@ -475,9 +492,6 @@ class SR_MCVQA_EMB:
                                                             use_aux_loss=use_aux_loss, top_k=top_k,
                                                             train_skip_self=train_skip_self)
         self.model.to(device='cuda')
-        #################################
-        # self.freeze_retrieval_part()
-        #################################
         v = torch.zeros(1, 768).to('cuda')
         aud = torch.zeros(1, 768).to('cuda')
         ocr = torch.ones(1, 768).to('cuda')
@@ -671,14 +685,18 @@ class SR_MCVQA_EMB:
                     n_feats, \
                     n_answ, \
                     n_auds, \
-                    n_ocrs, q = batch['v'], \
+                    n_ocrs, \
+                    q, \
+                    gt_answer_int = batch['v'], \
                     batch['aud'], \
                     batch['ocr'], \
                     batch['o'], \
                     batch['n_feats'], \
                     batch['n_answers'], \
                     batch['n_auds'], \
-                    batch['n_ocrs'], batch['question_emb']
+                    batch['n_ocrs'], \
+                    batch['question_emb'], \
+                    batch['gt_answer_int']
                 _sim_scores, _, _ = self.model(v=v,
                                                aud=aud,
                                                ocr=ocr,
@@ -688,7 +706,7 @@ class SR_MCVQA_EMB:
                                                n_answ=n_answ,
                                                n_auds=n_auds,
                                                n_ocrs=n_ocrs,
-                                               gt_answer_int=None)
+                                               gt_answer_int=gt_answer_int, q=q)
                 try:
                     for f in _sim_scores.squeeze().argmax(dim=-1):
                         gg.append(f)
@@ -775,6 +793,13 @@ class SR_MCVQA_EMB:
             for d in keys:
                 data['state_dict'].pop(d)
             self.model.load_state_dict(data['state_dict'], strict=False)
+        elif part == 3:
+            items = data
+            items.update({'common_option_base.weight': items['linear_proj.weight']})
+            items.update({'common_option_base.bias': items['linear_proj.bias']})
+            items.pop('linear_proj.weight')
+            items.pop('linear_proj.bias')
+            self.model.load_state_dict(items, strict=False)
         self.model.eval()
 
     def freeze_retrieval_part(self):

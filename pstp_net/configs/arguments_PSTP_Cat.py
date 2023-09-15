@@ -30,11 +30,11 @@ parser.add_argument("--answer_keys", type=str, default=os.path.join(base_path, '
                     help="answer keys")
 
 ### ======================== Label Configs ==========================
-parser.add_argument("--label_train", type=str, default="./dataset/split_que_id/perception_train.json",
+parser.add_argument("--label_train", type=str, default="/home/spyros/Desktop/TooDumbToFail/pstp_net/dataset/split_que_id/perception_train.json",
                     help="train csv file")
-parser.add_argument("--label_val", type=str, default="./dataset/split_que_id/perception_valid.json",
+parser.add_argument("--label_val", type=str, default="/home/spyros/Desktop/TooDumbToFail/pstp_net//dataset/split_que_id/perception_valid.json",
                     help="val csv file")
-parser.add_argument("--label_test", type=str, default="./dataset/split_que_id/perception_test.json",
+parser.add_argument("--label_test", type=str, default="/home/spyros/Desktop/TooDumbToFail/pstp_net//dataset/split_que_id/perception_test.json",
                     help="test csv file")
 
 
@@ -71,9 +71,9 @@ parser.add_argument("--num_layers", type=int, default=4, metavar='num_layers',
 ### ======================== Learning Configs ==========================
 parser.add_argument('--batch-size', type=int, default=8, metavar='N',
                     help='input batch size for training (default: 8)')
-parser.add_argument('--epochs', type=int, default=30, metavar='E',
+parser.add_argument('--epochs', type=int, default=70, metavar='E',
                     help='number of epochs to train (default: 20)')
-parser.add_argument('--lr', type=float, default=5e-4, metavar='LR',
+parser.add_argument('--lr', type=float, default=3e-4, metavar='LR',
                     help='learning rate (default: 3e-4)')
 parser.add_argument('--eval_every', type=int, default=5, metavar='eval_every',
                     help='eval every epochs')
@@ -84,7 +84,7 @@ parser.add_argument('--seed', type=int, default=1, metavar='S',
 ### ======================== Save Configs ==========================
 parser.add_argument( "--checkpoint", type=str, default='Test_No_Vid',
                     help="save model name")
-parser.add_argument("--model_save_dir", type=str, default='./runs/models_pstp_cat/',
+parser.add_argument("--model_save_dir", type=str, default='n/runs/models_pstp_cat/',
                     help="model save dir")
 parser.add_argument("--mode", type=str, default='train',
                     help="with mode to use")

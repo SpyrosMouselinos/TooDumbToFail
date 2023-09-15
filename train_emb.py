@@ -36,10 +36,13 @@ model = SR_MCVQA_EMB(active_ds=train_mc_vqa_dataset,
                      use_embedding=False,
                      use_aux_loss=0,
                      model_version=5,
-                     top_k=10,
+                     top_k=100,
+                     common_dropout=0.0,
                      train_skip_self=True)
-
+model.load_weights('SR_MCVQA_EMB_Model_SKIPSELF5.pth', part=1)
 for i in range(100):
-    model.fit(lr=0.001, bs=32, epochs=10)
+    model.fit(lr=1, bs=32, epochs=5)
     if i % 2 == 1:
         model.eval(val_dataset=val_mc_vqa_dataset)
+
+

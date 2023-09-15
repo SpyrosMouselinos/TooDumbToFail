@@ -6,7 +6,7 @@ from torchvision.transforms import transforms
 
 from dataloader import *
 from nets.PSTP_Net_Cat import Cataphract
-from configs.arguments_PSTP_Cat import parser
+from configs.arguments_BLIP_Cat import parser
 import warnings
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
@@ -16,26 +16,13 @@ TIMESTAMP = "{0:%Y-%m-%d-%H-%M-%S/}".format(datetime.now())
 warnings.filterwarnings('ignore')
 
 
-
-
 def train(args, model, train_loader, optimizer, writer, epoch, scaler=None):
     model.train()
 
     running_train_loss = 0
     running_train_acc = 0
     for batch_idx, sample in enumerate(train_loader):
-        if 'audios_feat' in sample:
-            audios_feat = sample['audios_feat'].to('cuda')
-        else:
-            audios_feat = None
-        if 'ocr_feat' in sample:
-            ocr_feat = sample['ocr_feat'].to('cuda')
-        else:
-            ocr_feat = None
-        if 'video_feat' in sample:
-            video_feat = sample['video_feat'].to('cuda')
-        else:
-            video_feat = None
+        print(batch_idx)
 
         visual_feat = sample['visual_feat'].to('cuda')
         patch_feat = sample['patch_feat'].to('cuda')
@@ -156,67 +143,43 @@ def main():
     tensorboard_name = args.checkpoint
     writer = SummaryWriter('runs/strn/' + TIMESTAMP + '_' + tensorboard_name)
 
-    from thop import profile
-    from thop import clever_format
-
+    # from thop import profile
+    # from thop import clever_format
+    #
     model = Cataphract(args)
     model = model.to('cuda')
-    audio_input = torch.randn(2, 768).to('cuda')
-    visual_input = torch.randn(2, 60, 512).to('cuda')
-    patch_input = torch.randn(2, 60, 50, 768).to('cuda')
-    video_input = torch.randn(2, 768).to('cuda')
-    ocr_input = torch.randn(2, 768).to('cuda')
-    question_input = torch.randn(2, 1, 512).to('cuda')  # Squeezed inside first block
-    qst_word_input = torch.randn(2, 1, 77, 512).to('cuda')  # Squeezed inside third block
-    options_input = torch.randn(2, 3, 512).to('cuda')
-    answer = torch.zeros(2, dtype=torch.long).to('cuda')
+    # audio_input = torch.randn(2, 768).to('cuda')
+    # visual_input = torch.randn(2, 60, 512).to('cuda')
+    # patch_input = torch.randn(2, 60, 50, 768).to('cuda')
+    # video_input = torch.randn(2, 768).to('cuda')
+    # ocr_input = torch.randn(2, 768).to('cuda')
+    # question_input = torch.randn(2, 1, 512).to('cuda')  # Squeezed inside first block
+    # qst_word_input = torch.randn(2, 1, 77, 512).to('cuda')  # Squeezed inside third block
+    # options_input = torch.randn(2, 3, 512).to('cuda')
+    # answer = torch.zeros(2, dtype=torch.long).to('cuda')
+    #
+    # flops, params = profile(model, inputs=(
+    #     audio_input, visual_input, patch_input, video_input, ocr_input, question_input, qst_word_input, options_input,
+    #     answer))
+    # print("profile: ", flops, params)
+    # flops, params = clever_format([flops, params], "%.3f")
+    # print("clever: ", flops, params)
 
-    flops, params = profile(model, inputs=(
-        audio_input, visual_input, patch_input, video_input, ocr_input, question_input, qst_word_input, options_input,
-        answer))
-    print("profile: ", flops, params)
-    flops, params = clever_format([flops, params], "%.3f")
-    print("clever: ", flops, params)
+    dataset = PerceptionBLIP_dataset(args=args,
+                                     video_dir=args.video_dir,
+                                     image_dir=args.image_dir,
+                                     image_feat_dir=args.image_feat_dir,
+                                     question_feat_dir=None,
+                                     answer_feat_dir=None,
+                                     transform=transforms.Compose([TensorHalfMove()]),
+                                     mode_flag='train')
 
-    # data = torch.load('./runs/models_pstp_cat/Test_No_Vid.pt')
-    # ### Kick out Time Encoder / Space Encoder ###
-    # ignore = [f for f in data.keys() if 'time' in f] + [f for f in data.keys() if 'space' in f]
-    # for i in ignore:
-    #     data.pop(i)
-    # model.load_state_dict(data,strict=False)
-
-    # -------------> Computation costs end
-
-    train_dataset = PerceptionAVQA_dataset(label=args.label_train,
-                                           args=args,
-                                           audios_feat_dir=args.audios_feat_dir,  # Path to Audio feats
-                                           visual_feat_dir=None,
-                                           video_dir=args.video_feat_dir,
-                                           ocr_dir=args.ocr_feat_dir,
-                                           clip_vit_b32_dir=args.clip_vit_b32_dir,  # Path to CLIP Video feats
-                                           clip_qst_dir=None,
-                                           clip_word_dir=args.clip_word_dir,  # Path to CLIP Question feats
-                                           clip_word_ans_dir=args.clip_word_ans_dir,  # Path to CLIP Answer feats
-                                           transform=transforms.Compose([ToTensor()]),
-                                           mode_flag='train')
-    val_dataset = PerceptionAVQA_dataset(label=args.label_val,
-                                         args=args,
-                                         audios_feat_dir=args.audios_feat_dir,  # Path to Audio feats
-                                         visual_feat_dir=None,
-                                         video_dir=args.video_feat_dir,
-                                         ocr_dir=args.ocr_feat_dir,
-                                         clip_vit_b32_dir=args.clip_vit_b32_dir,  # Path to CLIP Video feats
-                                         clip_qst_dir=None,
-                                         clip_word_dir=args.clip_word_dir,  # Path to CLIP Question feats
-                                         clip_word_ans_dir=args.clip_word_ans_dir,  # Path to CLIP Answer feats
-                                         transform=transforms.Compose([ToTensor()]),
-                                         mode_flag='valid')
-
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
-                              pin_memory=False)
-
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
-                            pin_memory=False)
+    loader = DataLoader(dataset,
+                        batch_size=args.batch_size,
+                        shuffle=True,
+                        num_workers=args.num_workers,
+                        pin_memory=False,
+                        collate_fn=dataset.pad_collate)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
@@ -228,18 +191,18 @@ def main():
     else:
         scaler = None
     for epoch in range(1, args.epochs + 1):
-
-        # train for one epoch
-        train(args, model, train_loader, optimizer, writer, epoch=epoch, scaler=scaler)
+        train(args, model, loader, optimizer, writer, epoch=epoch, scaler=scaler)
+        scheduler.step(epoch)
 
         # Evaluate on validation set
         if epoch % args.eval_every == 0:
-            scheduler.step(epoch)
-            current_acc = eval(model, val_loader, writer, epoch, scaler=scaler)
+            dataset.set_to_val_mode()
+            current_acc = eval(model, loader, writer, epoch, scaler=scaler)
             if current_acc >= best_acc:
                 best_acc = current_acc
                 best_epoch = epoch
                 torch.save(model.state_dict(), args.model_save_dir + args.checkpoint + ".pt")
+            dataset.set_to_train_mode()
 
         print("Best Acc: %.2f %%" % best_acc)
         print("Best Epoch: ", best_epoch)

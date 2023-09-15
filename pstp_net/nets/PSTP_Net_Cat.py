@@ -4,6 +4,9 @@ import torch.nn.functional as F
 import copy
 from torchmetrics.classification import MulticlassAccuracy
 import numpy as np
+import sys
+sys.path.append('/home/spyros/Desktop/TooDumbToFail')
+from S4Torch.s4torch.model import S4Model
 
 
 def get_emb(sin_inp):
@@ -296,7 +299,6 @@ class TemporalFuser2d(nn.Module):
         return x.squeeze(1)
 
 
-
 class TemporalSelection(nn.Module):
 
     def __init__(self, args):
@@ -420,11 +422,9 @@ class Cataphract(nn.Module):
     def __init__(self, args, hidden_size=512):
         super(Cataphract, self).__init__()
         self.args = args
-        self.num_layers = args.num_layers  # Layers = 1
         self.fc_aud = nn.Linear(768, hidden_size)
         self.fc_vid = nn.Linear(768, hidden_size)
         self.fc_ocr = nn.Linear(768, hidden_size)
-
         self.fc_v = nn.Linear(512, hidden_size)
         self.fc_p = nn.Linear(768, hidden_size)
 
@@ -432,38 +432,14 @@ class Cataphract(nn.Module):
         self.fc_o = nn.Linear(512, hidden_size)
         self.fc_w = nn.Linear(512, hidden_size)
 
-        # modules
-        self.temporal_selector = TemporalSelection(args)
-        self.spatial_selector = SpatialSelection(args)
-        self.smooth_time = TemporalFuser1d(60)
-        self.smooth_time_space = TemporalFuser2d(60, 25)
+        self.S4 = S4Model(d_input=1024, d_model=256, d_output=512, n_blocks=1, n=256, l_max=60, collapse=True,
+                          p_dropout=0.2)
 
-        self.CT1 = CrossModalTransformer(args,
-                                         CrossBlock(d_model=512, nhead=1, dim_feedforward=512),
-                                         num_layers=self.num_layers)
-        self.CT2 = CrossModalTransformer(args,
-                                         CrossBlock(d_model=512, nhead=1, dim_feedforward=512),
-                                         num_layers=self.num_layers)
-        self.CT3 = CrossModalTransformer(args,
-                                         CrossBlock(d_model=512, nhead=1, dim_feedforward=512),
-                                         num_layers=self.num_layers)
-
-        self.ST = UniModalTransformer(args,
-                                      Block(d_model=512, nhead=1, dim_feedforward=512),
-                                      num_layers=self.num_layers)
-
-        self.ST_OG = nn.TransformerEncoderLayer(d_model=512, nhead=1, dim_feedforward=512, dropout=0.1, batch_first=True)
-
-        self.time_encoder = PositionalEncoding1D(512)
-        self.space_encoder = PositionalEncoding2D(512)
-
+        #self.CT = CrossModalTransformer(encoder_layer=CrossBlock(d_model=512, nhead=8, dim_feedforward=2048, dropout=0.1), num_layers=6)
+        self.gru = nn.GRU(input_size=1024, hidden_size=512, num_layers=1, batch_first=True, dropout=0.2, bidirectional=True)
         self.EmbeddingSimilarityOutput = EmbSimHead()
-        self.normv = nn.LayerNorm(512)
-        self.normp = nn.LayerNorm(512)
-        self.cls_n = 4
-        self.cls = nn.Parameter(data=torch.randn(size=(self.cls_n, hidden_size), device='cuda'), requires_grad=True)
         self.fc_answer_pred = nn.Linear(512, 512)
-        self.project_down = nn.Sequential(nn.Linear(250, 128), nn.ReLU(), nn.Linear(128, 1))
+
     def forward(self, audio, visual, patch, video, ocr, question, qst_word, options, answer=None):
         if audio is not None:
             audio_feat = self.fc_aud(audio)
@@ -471,32 +447,16 @@ class Cataphract(nn.Module):
             video_feat = self.fc_vid(video)
         if ocr is not None:
             ocr_feat = self.fc_ocr(ocr)
-
-        visual_feat = self.fc_v(visual)
-        patch_feat = self.fc_p(patch)
-
-        #cls = self.cls.repeat(visual_feat.size()[0], 1, 1)
-        qst_feat = self.fc_q(question).squeeze(-2)
-        #word_feat = self.fc_w(qst_word).squeeze(-3)
         options_feat = self.fc_o(options)
 
+        visual_feat = self.fc_v(visual)
+        qst_feat = self.fc_q(question)
 
-        ### Step 0: Time Space Encoding ###
-        #visual_feat = self.normv(visual_feat + self.time_encoder(visual_feat))
-        #patch_feat = self.normp(patch_feat + self.space_encoder(patch_feat))
-        ### Step 1: Filter relevant frames ###
-        _, top_k_patches = self.temporal_selector(query=visual_feat, key=qst_feat, value=patch_feat)
-        ### Step 2: Filter relevant frame patches ###
-        top_km_patches = self.spatial_selector(filtered_qv=top_k_patches, key=qst_feat)
-        B, N, P, C = top_km_patches.size()
-
-        ### Fuse Global Representations ###
-        fused_global_patch_feats = top_km_patches.view(B, N*P, C).transpose(1, 2)
-        fused_global_patch_feats = self.project_down(fused_global_patch_feats).squeeze(2)
-        ### Step 5. Fusion module ###
-        avq_feat = torch.mul(fused_global_patch_feats, qst_feat)
-        avq_feat = F.tanh(avq_feat)
-        avq_feat = self.fc_answer_pred(avq_feat)
+        qst_feat = qst_feat.repeat(1, visual_feat.size()[1], 1)
+        vq = torch.cat([visual_feat, qst_feat], dim=2)
+        #avq_feat = self.S4(vq)
+        _, avq_feat = self.gru(vq)
+        avq_feat = self.fc_answer_pred(avq_feat.mean(0))
         ### 7. Answer prediction moudule *************************************************************
         logits, loss, metric = self.EmbeddingSimilarityOutput(avq_feat, options_feat, answer)
         return logits, loss, metric

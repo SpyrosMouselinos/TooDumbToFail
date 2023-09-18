@@ -264,14 +264,14 @@ class PerceptionBLIP_dataset(Dataset):
             print("Reading directly from sets of images")
             from transformers import Blip2Processor, Blip2VisionModel
             self.visual_input_mode = 'images'
-            self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-            self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b").to('cuda').half()
+            self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
+            self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco").to('cuda').half()
         elif self.video_dir is not None:
             print("Reading directly from videos")
             from transformers import Blip2Processor, Blip2VisionModel
             self.visual_input_mode = 'videos'
-            self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-            self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b").to('cuda').half()
+            self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
+            self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco").to('cuda').half()
         else:
             raise ValueError()
 
@@ -282,7 +282,7 @@ class PerceptionBLIP_dataset(Dataset):
             print("Reading directly questions from json")
             self.text_qinput_mode = 'text'
             from transformers import Blip2Processor
-            self.text_qprocessor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
+            self.text_qprocessor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
 
         if self.answer_feat_dir is not None:
             print('Reading pre-calculated BLIP2-Text Answer Features')
@@ -294,19 +294,25 @@ class PerceptionBLIP_dataset(Dataset):
             if self.text_qinput_mode == 'text':
                 self.text_aprocessor = self.text_qprocessor
             else:
-                self.text_aprocessor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
+                self.text_aprocessor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
 
         self.set_to_train_mode()
         self.transform = transform
 
     def set_to_train_mode(self):
-        self.mode_flag == 'train'
+        self.mode_flag = 'train'
         self.samples = json.load(
             open(f'/home/spyros/Desktop/TooDumbToFail/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
                  'r'))
 
     def set_to_val_mode(self):
-        self.mode_flag == 'valid'
+        self.mode_flag = 'valid'
+        self.samples = json.load(
+            open(f'/home/spyros/Desktop/TooDumbToFail/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
+                 'r'))
+
+    def set_to_test_mode(self):
+        self.mode_flag = 'test'
         self.samples = json.load(
             open(f'/home/spyros/Desktop/TooDumbToFail/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
                  'r'))
@@ -318,13 +324,13 @@ class PerceptionBLIP_dataset(Dataset):
     def pad_collate(batch):
         final_batch = {}
         final_batch.update({"image_feats": torch.stack([f['image_feats'][:3, :, :] for f in batch], dim=0)})
-        qt = torch.nn.utils.rnn.pad_sequence([f['question_tokenized'] for f in batch], batch_first=True, padding_value=1)
-        final_batch.update({"question_tokenized": qt})
-        ot = torch.nn.utils.rnn.pad_sequence([x for f in batch for x in f['options_tokenized']], batch_first=True, padding_value=1)
-        final_batch.update({"options_tokenized": ot.view(qt.size()[0], 3, -1)})
-        at = torch.nn.utils.rnn.pad_sequence([f['answer_tokenized'] for f in batch], batch_first=True, padding_value=1)
-        final_batch.update({"answer_tokenized": at})
-        return batch
+        qt = torch.nn.utils.rnn.pad_sequence([f['question_and_options_tokenized'] for f in batch], batch_first=True,
+                                             padding_value=1)
+        final_batch.update({"question_and_options_tokenized": qt})
+        if 'answer_tokenized' in batch[0]:
+            at = torch.nn.utils.rnn.pad_sequence([f['answer_tokenized'] for f in batch], batch_first=True, padding_value=1)
+            final_batch.update({"answer_tokenized": at})
+        return final_batch
 
     def read_video(self, path):
         if not os.path.isfile(path):
@@ -394,16 +400,18 @@ class PerceptionBLIP_dataset(Dataset):
         video_id = sample['video_id']
         question_text = sample['question_content']
         options_text = sample['options']
-        answer_text = sample['anser']
-        answer_index = sample['answer_id']
+        if self.mode_flag != 'test':
+            answer_index = sample['answer_id']
 
         if self.text_qinput_mode == 'text':
-            question_tokenized = self.text_qprocessor(text=question_text)['input_ids']
-        else:
-            raise NotImplementedError
-        if self.text_ainput_mode == 'text':
-            options_tokenized = self.text_aprocessor(text=options_text)['input_ids']
-            answer_tokenized = self.text_aprocessor(text=answer_text)['input_ids']
+            question_and_options_tokenized = 'Question: ' + question_text + '\n'
+            question_and_options_tokenized += 'Option A: ' + options_text[0] + '\n'
+            question_and_options_tokenized += 'Option B: ' + options_text[1] + '\n'
+            question_and_options_tokenized += 'Option C: ' + options_text[2] + '\n Answer: '
+            question_and_options_tokenized = self.text_qprocessor(text=question_and_options_tokenized)['input_ids']
+            if self.mode_flag != 'test':
+                answer_prefix = f'{["A", "B", "C"][answer_index]}'
+                answer_tokenized = self.text_aprocessor(text=answer_prefix)['input_ids']
         else:
             raise NotImplementedError
 
@@ -434,11 +442,12 @@ class PerceptionBLIP_dataset(Dataset):
             raise NotImplementedError
 
         sample = {'image_feats': image_feats,
-                  'question_tokenized': question_tokenized,
-                  'options_tokenized': options_tokenized,
-                  'answer_tokenized': answer_tokenized,
-                  'answer_index': answer_index}
+                  'question_and_options_tokenized': question_and_options_tokenized
+                  }
 
+        if self.mode_flag != 'test':
+            sample.update({'answer_tokenized': answer_tokenized})
+            sample.update({'answer_index': answer_index})
         if self.transform:
             sample = self.transform(sample)
 
@@ -448,18 +457,18 @@ class PerceptionBLIP_dataset(Dataset):
 class TensorHalfMove(object):
     def __call__(self, sample):
         image_feats = sample['image_feats']
-        question_tokenized = sample['question_tokenized']
-        options_tokenized = sample['options_tokenized']
-        answer_tokenized = sample['answer_tokenized']
-        answer_index = sample['answer_index']
+        question_and_options_tokenized = sample['question_and_options_tokenized']
+        if 'answer_tokenized' in sample:
+            answer_tokenized = sample['answer_tokenized']
+            answer_index = sample['answer_index']
 
         batch = {
             'image_feats': image_feats,
-            'question_tokenized': torch.LongTensor(question_tokenized),
-            'options_tokenized': [torch.LongTensor(f) for f in options_tokenized],
-            'answer_tokenized': torch.LongTensor(answer_tokenized),
-            'answer_index': torch.LongTensor([answer_index])
+            'question_and_options_tokenized': torch.LongTensor(question_and_options_tokenized),
         }
+        if 'answer_tokenized' in sample:
+            batch.update({'answer_tokenized': torch.LongTensor(answer_tokenized)})
+            batch.update({'answer_index': torch.LongTensor([answer_index])})
 
         return batch
 

@@ -1,11 +1,9 @@
-import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
 
 from dataloader import *
-from nets.PSTP_Net_Cat import Cataphract
+from nets.Temporal_Net import TBLIP
 from configs.arguments_BLIP_Cat import parser
 import warnings
 from datetime import datetime
@@ -22,40 +20,23 @@ def train(args, model, train_loader, optimizer, writer, epoch, scaler=None):
     running_train_loss = 0
     running_train_acc = 0
     for batch_idx, sample in enumerate(train_loader):
-        print(batch_idx)
-
-        visual_feat = sample['visual_feat'].to('cuda')
-        patch_feat = sample['patch_feat'].to('cuda')
-        question = sample['question'].to('cuda').unsqueeze(1)
-        qst_word = sample['qst_word'].to('cuda').unsqueeze(1)
-        options_feat = sample['options_feat'].to('cuda')
-        answer_label = sample['answer_label'].to('cuda')
-
+        image_feats = sample['image_feats'].to('cuda')
+        question_and_options_tokenized = sample['question_and_options_tokenized'].to('cuda')
+        answer_tokenized = sample['answer_tokenized'].to('cuda')
         optimizer.zero_grad()
+
         if scaler is not None:
             with autocast(dtype=torch.float16):
-                output_qa, loss, metric = model(audio=audios_feat,
-                                                visual=visual_feat,
-                                                patch=patch_feat,
-                                                video=video_feat,
-                                                ocr=ocr_feat,
-                                                question=question,
-                                                qst_word=qst_word,
-                                                options=options_feat,
-                                                answer=answer_label)
+                output_qa, loss, metric = model(image_feats=image_feats,
+                                                question_and_options_tokenized=question_and_options_tokenized,
+                                                answer_tokenized=answer_tokenized)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            output_qa, loss, metric = model(audio=audios_feat,
-                                            visual=visual_feat,
-                                            patch=patch_feat,
-                                            video=video_feat,
-                                            ocr=ocr_feat,
-                                            question=question,
-                                            qst_word=qst_word,
-                                            options=options_feat,
-                                            answer=answer_label)
+            output_qa, loss, metric = model(image_feats=image_feats,
+                                            question_and_options_tokenized=question_and_options_tokenized,
+                                            answer_tokenized=answer_tokenized)
             loss.backward()
             optimizer.step()
 
@@ -80,46 +61,19 @@ def eval(model, val_loader, writer, epoch, scaler=None):
 
     with torch.no_grad():
         for batch_idx, sample in enumerate(val_loader):
-            if 'audios_feat' in sample:
-                audios_feat = sample['audios_feat'].to('cuda')
-            else:
-                audios_feat = None
-            if 'ocr_feat' in sample:
-                ocr_feat = sample['ocr_feat'].to('cuda')
-            else:
-                ocr_feat = None
-            if 'video_feat' in sample:
-                video_feat = sample['video_feat'].to('cuda')
-            else:
-                video_feat = None
-            visual_feat = sample['visual_feat'].to('cuda')
-            patch_feat = sample['patch_feat'].to('cuda')
-            question = sample['question'].to('cuda').unsqueeze(1)
-            qst_word = sample['qst_word'].to('cuda').unsqueeze(1)
-            options_feat = sample['options_feat'].to('cuda')
-            answer_label = sample['answer_label'].to('cuda')
+            image_feats = sample['image_feats'].to('cuda')
+            question_and_options_tokenized = sample['question_and_options_tokenized'].to('cuda')
+            answer_tokenized = sample['answer_tokenized'].to('cuda')
 
             if scaler is not None:
                 with autocast(dtype=torch.float16):
-                    _, loss, metric = model(audio=audios_feat,
-                                            visual=visual_feat,
-                                            patch=patch_feat,
-                                            video=video_feat,
-                                            ocr=ocr_feat,
-                                            question=question,
-                                            qst_word=qst_word,
-                                            options=options_feat,
-                                            answer=answer_label)
+                    _, loss, metric = model(image_feats=image_feats,
+                                            question_and_options_tokenized=question_and_options_tokenized,
+                                            answer_tokenized=answer_tokenized)
             else:
-                _, loss, metric = model(audio=audios_feat,
-                                        visual=visual_feat,
-                                        patch=patch_feat,
-                                        video=video_feat,
-                                        ocr=ocr_feat,
-                                        question=question,
-                                        qst_word=qst_word,
-                                        options=options_feat,
-                                        answer=answer_label)
+                _, loss, metric = model(image_feats=image_feats,
+                                        question_and_options_tokenized=question_and_options_tokenized,
+                                        answer_tokenized=answer_tokenized)
 
             total_examples += 1
             total_loss += loss.item()
@@ -134,6 +88,25 @@ def eval(model, val_loader, writer, epoch, scaler=None):
 
     return val_acc
 
+def m_test(model, test_loader, scaler=None):
+    suggested_answers = []
+    model.eval()
+    with torch.no_grad():
+        for batch_idx, sample in enumerate(test_loader):
+            image_feats = sample['image_feats'].to('cuda')
+            question_and_options_tokenized = sample['question_and_options_tokenized'].to('cuda')
+
+            if scaler is not None:
+                with autocast(dtype=torch.float16):
+                    suggested_answer, _, _ = model(image_feats=image_feats,
+                                            question_and_options_tokenized=question_and_options_tokenized,
+                                            answer_tokenized=None)
+            else:
+                suggested_answer, _, _ = model(image_feats=image_feats,
+                                        question_and_options_tokenized=question_and_options_tokenized,
+                                        answer_tokenized=None)
+    suggested_answers.append(suggested_answer)
+    return suggested_answers
 
 def main():
     args = parser.parse_args()
@@ -143,27 +116,8 @@ def main():
     tensorboard_name = args.checkpoint
     writer = SummaryWriter('runs/strn/' + TIMESTAMP + '_' + tensorboard_name)
 
-    # from thop import profile
-    # from thop import clever_format
-    #
-    model = Cataphract(args)
-    model = model.to('cuda')
-    # audio_input = torch.randn(2, 768).to('cuda')
-    # visual_input = torch.randn(2, 60, 512).to('cuda')
-    # patch_input = torch.randn(2, 60, 50, 768).to('cuda')
-    # video_input = torch.randn(2, 768).to('cuda')
-    # ocr_input = torch.randn(2, 768).to('cuda')
-    # question_input = torch.randn(2, 1, 512).to('cuda')  # Squeezed inside first block
-    # qst_word_input = torch.randn(2, 1, 77, 512).to('cuda')  # Squeezed inside third block
-    # options_input = torch.randn(2, 3, 512).to('cuda')
-    # answer = torch.zeros(2, dtype=torch.long).to('cuda')
-    #
-    # flops, params = profile(model, inputs=(
-    #     audio_input, visual_input, patch_input, video_input, ocr_input, question_input, qst_word_input, options_input,
-    #     answer))
-    # print("profile: ", flops, params)
-    # flops, params = clever_format([flops, params], "%.3f")
-    # print("clever: ", flops, params)
+    model = TBLIP.from_pretrained("Salesforce/blip2-opt-2.7b")
+    #model = model.to('cuda').half()
 
     dataset = PerceptionBLIP_dataset(args=args,
                                      video_dir=args.video_dir,
@@ -210,5 +164,5 @@ def main():
 
 
 if __name__ == '__main__':
-    torch.multiprocessing.set_start_method('spawn')
+    #torch.multiprocessing.set_start_method('spawn')
     main()

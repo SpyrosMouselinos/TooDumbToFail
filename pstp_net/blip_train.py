@@ -1,8 +1,9 @@
+import os
+import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
-
-from dataloader import *
+from dataloader import device, PerceptionBLIP_dataset, TensorHalfMove
 from nets.Temporal_Net import TBLIP
 from configs.arguments_BLIP_Cat import parser
 import warnings
@@ -20,9 +21,9 @@ def train(args, model, train_loader, optimizer, writer, epoch, scaler=None):
     running_train_loss = 0
     running_train_acc = 0
     for batch_idx, sample in enumerate(train_loader):
-        image_feats = sample['image_feats'].to('cuda')
-        question_and_options_tokenized = sample['question_and_options_tokenized'].to('cuda')
-        answer_tokenized = sample['answer_tokenized'].to('cuda')
+        image_feats = sample['image_feats'].to(device).float()
+        question_and_options_tokenized = sample['question_and_options_tokenized'].to(device)
+        answer_tokenized = sample['answer_tokenized'].to(device)
         optimizer.zero_grad()
 
         if scaler is not None:
@@ -61,9 +62,9 @@ def eval(model, val_loader, writer, epoch, scaler=None):
 
     with torch.no_grad():
         for batch_idx, sample in enumerate(val_loader):
-            image_feats = sample['image_feats'].to('cuda')
-            question_and_options_tokenized = sample['question_and_options_tokenized'].to('cuda')
-            answer_tokenized = sample['answer_tokenized'].to('cuda')
+            image_feats = sample['image_feats'].to(device)
+            question_and_options_tokenized = sample['question_and_options_tokenized'].to(device)
+            answer_tokenized = sample['answer_tokenized'].to(device)
 
             if scaler is not None:
                 with autocast(dtype=torch.float16):
@@ -88,6 +89,7 @@ def eval(model, val_loader, writer, epoch, scaler=None):
 
     return val_acc
 
+
 def m_test(model, test_loader, scaler=None):
     suggested_answers = []
     model.eval()
@@ -99,14 +101,15 @@ def m_test(model, test_loader, scaler=None):
             if scaler is not None:
                 with autocast(dtype=torch.float16):
                     suggested_answer, _, _ = model(image_feats=image_feats,
-                                            question_and_options_tokenized=question_and_options_tokenized,
-                                            answer_tokenized=None)
+                                                   question_and_options_tokenized=question_and_options_tokenized,
+                                                   answer_tokenized=None)
             else:
                 suggested_answer, _, _ = model(image_feats=image_feats,
-                                        question_and_options_tokenized=question_and_options_tokenized,
-                                        answer_tokenized=None)
+                                               question_and_options_tokenized=question_and_options_tokenized,
+                                               answer_tokenized=None)
     suggested_answers.append(suggested_answer)
     return suggested_answers
+
 
 def main():
     args = parser.parse_args()
@@ -117,7 +120,6 @@ def main():
     writer = SummaryWriter('runs/strn/' + TIMESTAMP + '_' + tensorboard_name)
 
     model = TBLIP.from_pretrained("Salesforce/blip2-opt-2.7b")
-    #model = model.to('cuda').half()
 
     dataset = PerceptionBLIP_dataset(args=args,
                                      video_dir=args.video_dir,
@@ -136,7 +138,7 @@ def main():
                         collate_fn=dataset.pad_collate)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     best_acc = 0
     best_epoch = 0
@@ -164,5 +166,5 @@ def main():
 
 
 if __name__ == '__main__':
-    #torch.multiprocessing.set_start_method('spawn')
+    # torch.multiprocessing.set_start_method('spawn')
     main()

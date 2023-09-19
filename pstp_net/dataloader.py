@@ -8,7 +8,10 @@ import ast
 import json
 import decord as de
 
+from pstp_net.configs.arguments_BLIP_Cat import c_path
+
 ctx = de.cpu(0)
+device = 'cuda'
 
 
 def ids_to_multinomial(id, categories):
@@ -265,13 +268,15 @@ class PerceptionBLIP_dataset(Dataset):
             from transformers import Blip2Processor, Blip2VisionModel
             self.visual_input_mode = 'images'
             self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
-            self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco").to('cuda').half()
+            self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco",
+                                                                     ).to(device).half()
         elif self.video_dir is not None:
             print("Reading directly from videos")
             from transformers import Blip2Processor, Blip2VisionModel
             self.visual_input_mode = 'videos'
             self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
-            self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco").to('cuda').half()
+            self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco",
+                                                                     ).to(device).half()
         else:
             raise ValueError()
 
@@ -302,19 +307,19 @@ class PerceptionBLIP_dataset(Dataset):
     def set_to_train_mode(self):
         self.mode_flag = 'train'
         self.samples = json.load(
-            open(f'/home/spyros/Desktop/TooDumbToFail/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
+            open(c_path + f'/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
                  'r'))
 
     def set_to_val_mode(self):
         self.mode_flag = 'valid'
         self.samples = json.load(
-            open(f'/home/spyros/Desktop/TooDumbToFail/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
+            open(c_path + f'/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
                  'r'))
 
     def set_to_test_mode(self):
         self.mode_flag = 'test'
         self.samples = json.load(
-            open(f'/home/spyros/Desktop/TooDumbToFail/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
+            open(c_path + f'/pstp_net/dataset/split_que_id/perception_{self.mode_flag}.json',
                  'r'))
 
     def __len__(self):
@@ -323,12 +328,14 @@ class PerceptionBLIP_dataset(Dataset):
     @staticmethod
     def pad_collate(batch):
         final_batch = {}
-        final_batch.update({"image_feats": torch.stack([f['image_feats'][:3, :, :] for f in batch], dim=0)})
+        # .mean(dim=0)
+        final_batch.update({"image_feats": torch.stack([f['image_feats'][:3, ...] for f in batch], dim=0)})
         qt = torch.nn.utils.rnn.pad_sequence([f['question_and_options_tokenized'] for f in batch], batch_first=True,
                                              padding_value=1)
         final_batch.update({"question_and_options_tokenized": qt})
         if 'answer_tokenized' in batch[0]:
-            at = torch.nn.utils.rnn.pad_sequence([f['answer_tokenized'] for f in batch], batch_first=True, padding_value=1)
+            at = torch.nn.utils.rnn.pad_sequence([f['answer_tokenized'] for f in batch], batch_first=True,
+                                                 padding_value=1)
             final_batch.update({"answer_tokenized": at})
         return final_batch
 
@@ -370,11 +377,11 @@ class PerceptionBLIP_dataset(Dataset):
         with torch.no_grad():
             for i in range(batches):
                 out = self.i_feat_extractor(
-                    pixel_values=tensor_images[i:(i + 1) * process_batch_size, :, :, :].to('cuda', torch.float16))[0]
+                    pixel_values=tensor_images[i:(i + 1) * process_batch_size, :, :, :].to(device, torch.float16))[0]
                 for j in out:
                     vision_outputs.append(j)
             if leftover > 0:
-                out = self.i_feat_extractor(pixel_values=tensor_images[-leftover:, :, :, :].to('cuda', torch.float16))[
+                out = self.i_feat_extractor(pixel_values=tensor_images[-leftover:, :, :, :].to(device, torch.float16))[
                     0]
                 for j in out:
                     vision_outputs.append(j)
@@ -411,7 +418,7 @@ class PerceptionBLIP_dataset(Dataset):
             question_and_options_tokenized = self.text_qprocessor(text=question_and_options_tokenized)['input_ids']
             if self.mode_flag != 'test':
                 answer_prefix = f'{["A", "B", "C"][answer_index]}'
-                answer_tokenized = self.text_aprocessor(text=answer_prefix)['input_ids']
+                answer_tokenized = self.text_aprocessor(text=answer_prefix)['input_ids'][1:]
         else:
             raise NotImplementedError
 

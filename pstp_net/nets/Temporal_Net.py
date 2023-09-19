@@ -1,95 +1,9 @@
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
-from torchmetrics.classification import MulticlassAccuracy
-import sys
 from transformers import AutoModelForSeq2SeqLM, AutoModelForCausalLM, Blip2Config
-from transformers.models.blip_2.modeling_blip_2 import Blip2ForConditionalGenerationModelOutput, Blip2QFormerModel, \
-    Blip2VisionModel, Blip2PreTrainedModel
-
-sys.path.append('/home/spyros/Desktop/TooDumbToFail')
-
-
-class TemporalSelection(nn.Module):
-
-    def __init__(self, args):
-        super(TemporalSelection, self).__init__()
-        self.args = args
-        self.attn_qst_query = nn.MultiheadAttention(512, 4, dropout=0.1)
-
-    def soft_attention_select_2d(self, query_feat, kv_feat):
-        kv_feat = kv_feat.permute(1, 0, 2)
-        query_feat = query_feat.unsqueeze(0)
-        _, temp_weights = self.attn_qst_query(query_feat, kv_feat, kv_feat,
-                                              attn_mask=None, key_padding_mask=None)
-        return temp_weights
-
-    def find_top_k_fast(self, temp_weights, modality, clip_len, C):
-        _, top_k_index_sort = torch.topk(temp_weights, k=self.args.top_k, dim=-1)
-        modality_new = modality[torch.arange(modality.size(0)).unsqueeze(1), top_k_index_sort.squeeze(1)]
-        return modality_new, top_k_index_sort
-
-    def select_top_k_fast(self, patch_feat, top_k_index_sort):
-        patch_select_new = patch_feat[torch.arange(patch_feat.size(0)).unsqueeze(1), top_k_index_sort.squeeze(1)]
-        return patch_select_new
-
-    def forward(self, query, key, value):
-        B, T, C = query.size()
-        clip_len = int(T / self.args.segs)
-        temp_weights = self.soft_attention_select_2d(key, query)
-        top_k_query, top_k_index_sort = self.find_top_k_fast(temp_weights, query,
-                                                             clip_len, C)
-        top_k_value = self.select_top_k_fast(value, top_k_index_sort)
-        return top_k_query, top_k_value
-
-
-class EmbSimHead(nn.Module):
-    def __init__(self):
-        super(EmbSimHead, self).__init__()
-        self.loss_fn = torch.nn.CrossEntropyLoss()
-        self.metric_fn = MulticlassAccuracy(num_classes=3, average='weighted')
-
-    def calc_loss(self, scores, gt):
-        """
-        Calculate Cross-Entropy Loss
-        :param scores: The unnormalised logits
-        :param gt: A list of the true labels
-        :return:
-        """
-        if not isinstance(gt, torch.Tensor):
-            gt = torch.LongTensor(gt).to('cuda')
-        if len(gt.size()) > 1:
-            gt = gt.squeeze(1)
-
-        return self.loss_fn(scores, gt)
-
-    def calc_acc(self, scores, gt):
-        """
-        Calculate Accuracy
-        :param scores: The unnormalised logits
-        :param gt: A list of the true labels
-        :return:
-        """
-
-        if not isinstance(gt, torch.Tensor):
-            gt = torch.LongTensor(gt).to('cuda')
-        if len(gt.size()) > 1:
-            gt = gt.squeeze(1)
-        scores = scores.argmax(dim=-1)
-        if len(scores.size()) > 1:
-            scores = scores.squeeze(1)
-        return self.metric_fn(scores, gt)
-
-    def forward(self, suggested_answer, options, gt_answer):
-        score_0 = torch.nn.functional.cosine_similarity(suggested_answer, options[:, 0, :], dim=1).unsqueeze(1)
-        score_1 = torch.nn.functional.cosine_similarity(suggested_answer, options[:, 1, :], dim=1).unsqueeze(1)
-        score_2 = torch.nn.functional.cosine_similarity(suggested_answer, options[:, 2, :], dim=1).unsqueeze(1)
-        scores = torch.cat([score_0, score_1, score_2], dim=1)
-        if gt_answer is not None:
-            loss = self.calc_loss(scores, gt_answer)
-            metric = self.calc_acc(scores[:, :3], gt_answer)
-            return scores, loss, metric
-        return scores, None, None
+from transformers.models.blip_2.modeling_blip_2 import Blip2QFormerModel, \
+    Blip2PreTrainedModel
 
 
 class TBLIP(Blip2PreTrainedModel):
@@ -114,6 +28,11 @@ class TBLIP(Blip2PreTrainedModel):
         self.language_model.eval()
         for param in self.language_model.parameters():
             param.requires_grad = False
+
+    def symbolic_acc(self, logits, labels, dim=1):
+        argmaxed_logits = torch.argmax(logits, dim=dim)  # BS, 1
+        acc = torch.sum(1.0 * (argmaxed_logits == labels)) / labels.size()[0]
+        return acc
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -144,28 +63,36 @@ class TBLIP(Blip2PreTrainedModel):
 
     def forward(
             self,
-            pixel_values: torch.FloatTensor,
+            image_feats: torch.FloatTensor,
             question_and_options_tokenized: torch.FloatTensor,
             answer_tokenized=None,
     ):
 
         return_dict = None
-        # step 1: forward the images through the vision encoder,
-        image_embeds = pixel_values
+        flag = False
+        if len(image_feats.size()) == 4:
+            # images are of size BS, 60, 677, 1408
+            B, L, X, Y = image_feats.size()
+            image_feats = image_feats.view(B * L, X, Y).contiguous()
+            flag = True
 
-        # step 2: forward the query tokens through the QFormer, using the image embeddings for cross-attention
-        image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
+        image_attention_mask = torch.ones(image_feats.size()[:-1], dtype=torch.long, device=image_feats.device)
+        query_tokens = self.query_tokens.expand(image_feats.shape[0], -1, -1)
 
-        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
         query_outputs = self.qformer(
             query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds,
+            encoder_hidden_states=image_feats,
             encoder_attention_mask=image_attention_mask,
             output_attentions=None,
             output_hidden_states=None,
             return_dict=return_dict,
         )
         query_output = query_outputs[0]
+        if flag:
+            # Queries are of size B * L, Z, V
+            _, Z, V = query_output.size()
+            query_output = query_output.view(B, L, Z, V).contiguous()
+            query_output = query_output.mean(dim=1)
 
         # step 3: use the language model, conditioned on the query outputs and the prompt
         language_model_inputs = self.language_projection(query_output)
@@ -174,7 +101,6 @@ class TBLIP(Blip2PreTrainedModel):
         )
         inputs_embeds = self.language_model.get_input_embeddings()(question_and_options_tokenized)
         inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
-
 
         attention_mask = torch.ones_like(question_and_options_tokenized)
         expected_device = language_model_attention_mask.device
@@ -192,20 +118,21 @@ class TBLIP(Blip2PreTrainedModel):
         # we compute the loss here since we need to take into account the sequence length of the query embeds
         if answer_tokenized is not None:
             answer_tokenized = answer_tokenized.to(logits.device)
-            logits = logits[:, -answer_tokenized.size(1):, :]
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = answer_tokenized[..., 1:].contiguous().to(logits.device)
+            # Last Logit is the answer
+            logits = logits[:, -1, :]
+            labels = answer_tokenized.contiguous().to(logits.device)
 
             # Flatten the tokens
             loss_fct = CrossEntropyLoss(reduction="mean")
-            loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
-        return logits, loss, outputs
+            metric_fct = self.symbolic_acc
+            loss = loss_fct(logits.view(-1, self.config.text_config.vocab_size), labels.view(-1))
+            metric = metric_fct(logits.view(-1, self.config.text_config.vocab_size), labels.view(-1))
+        return logits, loss, metric
 
     @torch.no_grad()
     def generate(
             self,
-            pixel_values: torch.FloatTensor,
+            image_feats: torch.FloatTensor,
             input_ids=None,
             attention_mask=None,
             **generate_kwargs,
@@ -215,14 +142,13 @@ class TBLIP(Blip2PreTrainedModel):
             # preprocess for `accelerate`
             self._preprocess_accelerate()
 
-        batch_size = pixel_values.shape[0]
-        image_embeds = self.vision_model(pixel_values, return_dict=True).last_hidden_state
-        image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
+        batch_size = image_feats.shape[0]
+        image_attention_mask = torch.ones(image_feats.size()[:-1], dtype=torch.long, device=image_feats.device)
 
-        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+        query_tokens = self.query_tokens.expand(image_feats.shape[0], -1, -1)
         query_outputs = self.qformer(
             query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds,
+            encoder_hidden_states=image_feats,
             encoder_attention_mask=image_attention_mask,
             return_dict=True,
         )
@@ -236,7 +162,7 @@ class TBLIP(Blip2PreTrainedModel):
             input_ids = (
                 torch.LongTensor([[self.config.text_config.bos_token_id]])
                 .repeat(batch_size, 1)
-                .to(image_embeds.device)
+                .to(image_feats.device)
             )
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
@@ -246,10 +172,7 @@ class TBLIP(Blip2PreTrainedModel):
         inputs_embeds = self.get_input_embeddings()(input_ids)
         inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
 
-        outputs = self.language_model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            **generate_kwargs,
-        )
+        outputs = self.language_model.generate(attention_mask=attention_mask, inputs_embeds=inputs_embeds,
+                                               **generate_kwargs)
 
         return outputs

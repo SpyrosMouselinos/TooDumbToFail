@@ -1,3 +1,5 @@
+import os.path
+
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
@@ -23,6 +25,23 @@ class TBLIP(Blip2PreTrainedModel):
         self.language_model = language_model
         self.post_init()
         self.freeze_lm()
+
+    def save_model(self, path):
+        important_keys = ['query_tokens', 'qformer', 'language_projection']
+        new_state_dict = {k: v for k, v in self.state_dict().items() if
+                          important_keys[0] in k or important_keys[1] in k or important_keys[2] in k}
+        pre_path = '/'.join(path.split('/')[:-1])
+        if os.path.exists(pre_path):
+            torch.save(new_state_dict, path)
+        else:
+            os.mkdir(pre_path)
+            torch.save(new_state_dict, path)
+        return
+
+    def load_model(self, path):
+        data = torch.load(path)
+        self.load_state_dict(data, strict=False)
+        return
 
     def freeze_lm(self):
         self.language_model.eval()
@@ -130,49 +149,64 @@ class TBLIP(Blip2PreTrainedModel):
         return logits, loss, metric
 
     @torch.no_grad()
-    def generate(
+    def answer(
             self,
             image_feats: torch.FloatTensor,
-            input_ids=None,
-            attention_mask=None,
-            **generate_kwargs,
-    ) -> torch.LongTensor:
+            question_and_options_tokenized: torch.FloatTensor):
 
-        if hasattr(self, "hf_device_map"):
-            # preprocess for `accelerate`
-            self._preprocess_accelerate()
+        return_dict = None
+        flag = False
+        if len(image_feats.size()) == 4:
+            # images are of size BS, 60, 677, 1408
+            B, L, X, Y = image_feats.size()
+            image_feats = image_feats.view(B * L, X, Y).contiguous()
+            flag = True
 
-        batch_size = image_feats.shape[0]
         image_attention_mask = torch.ones(image_feats.size()[:-1], dtype=torch.long, device=image_feats.device)
-
         query_tokens = self.query_tokens.expand(image_feats.shape[0], -1, -1)
+
         query_outputs = self.qformer(
             query_embeds=query_tokens,
             encoder_hidden_states=image_feats,
             encoder_attention_mask=image_attention_mask,
-            return_dict=True,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=return_dict,
         )
-        query_output = query_outputs.last_hidden_state
+        query_output = query_outputs[0]
+        if flag:
+            # Queries are of size B * L, Z, V
+            _, Z, V = query_output.size()
+            query_output = query_output.view(B, L, Z, V).contiguous()
+            query_output = query_output.mean(dim=1)
 
+        # step 3: use the language model, conditioned on the query outputs and the prompt
         language_model_inputs = self.language_projection(query_output)
-        language_attention_mask = torch.ones(
+        language_model_attention_mask = torch.ones(
             language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device
         )
-        if input_ids is None:
-            input_ids = (
-                torch.LongTensor([[self.config.text_config.bos_token_id]])
-                .repeat(batch_size, 1)
-                .to(image_feats.device)
-            )
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-        attention_mask = torch.cat([language_attention_mask, attention_mask.to(language_attention_mask.device)], dim=1)
-
-        # concatenate query embeddings with prompt embeddings
-        inputs_embeds = self.get_input_embeddings()(input_ids)
+        inputs_embeds = self.language_model.get_input_embeddings()(question_and_options_tokenized)
         inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
 
-        outputs = self.language_model.generate(attention_mask=attention_mask, inputs_embeds=inputs_embeds,
-                                               **generate_kwargs)
+        attention_mask = torch.ones_like(question_and_options_tokenized)
+        expected_device = language_model_attention_mask.device
+        attention_mask = torch.cat([language_model_attention_mask, attention_mask.to(expected_device)], dim=1)
 
-        return outputs
+        outputs = self.language_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=return_dict,
+        )
+        logits = outputs.logits if return_dict else outputs[0]
+        logits = logits[:, -1, :]
+        # A prob - location 250
+        prob_a = logits[:, 250]
+        # B prob - location 387
+        prob_b = logits[:, 387]
+        # C prob - location 347
+        prob_c = logits[:, 347]
+
+        probs = torch.stack([prob_a, prob_b, prob_c], dim=1)
+        return torch.argmax(probs, dim=1).detach().cpu().numpy()

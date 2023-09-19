@@ -7,11 +7,9 @@ from torch.utils.data import Dataset
 import ast
 import json
 import decord as de
-
-from pstp_net.configs.arguments_BLIP_Cat import c_path
+from configs.arguments_BLIP_Cat import c_path, dtype, device
 
 ctx = de.cpu(0)
-device = 'cuda'
 
 
 def ids_to_multinomial(id, categories):
@@ -269,14 +267,18 @@ class PerceptionBLIP_dataset(Dataset):
             self.visual_input_mode = 'images'
             self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
             self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco",
-                                                                     ).to(device).half()
+                                                                     ).to(device)
+            if device == 'cuda':
+                self.i_feat_extractor = self.i_feat_extractor.half()
         elif self.video_dir is not None:
             print("Reading directly from videos")
             from transformers import Blip2Processor, Blip2VisionModel
             self.visual_input_mode = 'videos'
             self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
             self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco",
-                                                                     ).to(device).half()
+                                                                     ).to(device)
+            if device == 'cuda':
+                self.i_feat_extractor = self.i_feat_extractor.half()
         else:
             raise ValueError()
 
@@ -329,7 +331,7 @@ class PerceptionBLIP_dataset(Dataset):
     def pad_collate(batch):
         final_batch = {}
         # .mean(dim=0)
-        final_batch.update({"image_feats": torch.stack([f['image_feats'][:3, ...] for f in batch], dim=0)})
+        final_batch.update({"image_feats": torch.stack([f['image_feats'] for f in batch], dim=0)})
         qt = torch.nn.utils.rnn.pad_sequence([f['question_and_options_tokenized'] for f in batch], batch_first=True,
                                              padding_value=1)
         final_batch.update({"question_and_options_tokenized": qt})
@@ -353,10 +355,10 @@ class PerceptionBLIP_dataset(Dataset):
         indices = np.linspace(0, t - 2, 60)
         indices = np.clip(indices, 0, t - 2).astype(int)
         frames = avr.get_batch(indices).asnumpy()
-        for frame_index in indices:
+        for real_index, frame_index in enumerate(indices):
             frame_filename = f"{video_id}_frame{frame_index}.jpg"
             frame_path = os.path.join(image_folder, frame_filename)
-            skimage.io.imsave(frame_path, frames[frame_index])
+            skimage.io.imsave(frame_path, frames[real_index])
         return frames
 
     def read_set_of_images(self, path):
@@ -374,14 +376,15 @@ class PerceptionBLIP_dataset(Dataset):
         batches = total_images // process_batch_size
         leftover = total_images - (process_batch_size * batches)
         vision_outputs = []
+
         with torch.no_grad():
             for i in range(batches):
                 out = self.i_feat_extractor(
-                    pixel_values=tensor_images[i:(i + 1) * process_batch_size, :, :, :].to(device, torch.float16))[0]
+                    pixel_values=tensor_images[i:(i + 1) * process_batch_size, :, :, :].to(device, dtype))[0]
                 for j in out:
                     vision_outputs.append(j)
             if leftover > 0:
-                out = self.i_feat_extractor(pixel_values=tensor_images[-leftover:, :, :, :].to(device, torch.float16))[
+                out = self.i_feat_extractor(pixel_values=tensor_images[-leftover:, :, :, :].to(device, dtype))[
                     0]
                 for j in out:
                     vision_outputs.append(j)
@@ -432,7 +435,7 @@ class PerceptionBLIP_dataset(Dataset):
                 images_tokenized = self.i_processor(images=set_of_images)['pixel_values']
                 image_feats = self.convert_set_of_images_to_feats(images_tokenized,
                                                                   os.path.join(self.image_feat_dir, video_id),
-                                                                  process_batch_size=1)
+                                                                  process_batch_size=self.args.preprocess_batch_size)
         elif self.visual_input_mode == 'images':
             if os.path.exists(os.path.join(self.image_feat_dir, video_id) + '.pkl'):
                 with open(os.path.join(self.image_feat_dir, video_id) + '.pkl', 'rb') as fout:
@@ -448,6 +451,10 @@ class PerceptionBLIP_dataset(Dataset):
         else:
             raise NotImplementedError
 
+        if self.args.use_mixed:
+            image_feats = image_feats.half()
+        else:
+            image_feats = image_feats.float()
         sample = {'image_feats': image_feats,
                   'question_and_options_tokenized': question_and_options_tokenized
                   }

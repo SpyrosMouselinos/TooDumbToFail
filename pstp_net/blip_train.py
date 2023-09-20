@@ -93,9 +93,9 @@ def main():
     torch.manual_seed(args.seed)
 
     if device != 'cpu':
-        model = TBLIP.from_pretrained("Salesforce/blip2-opt-2.7b", torch_dtype=torch.float16).to(device)
+        model = TBLIP.from_pretrained("Salesforce/blip2-opt-2.7b-coco").to(device)
     else:
-        model = TBLIP.from_pretrained("Salesforce/blip2-opt-2.7b")
+        model = TBLIP.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
     dataset = PerceptionBLIP_dataset(args=args,
                                      video_dir=args.video_dir,
                                      image_dir=args.image_dir,

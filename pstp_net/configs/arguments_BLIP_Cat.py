@@ -5,17 +5,18 @@ import torch
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch Implementation of OCR-Audio-Visual Question Answering')
 device = 'cuda'
-dtype = torch.float16 if device == 'cuda' else torch.float32
+dtype = torch.float32
 ### ======================== Dataset Configs ==========================
 c_path = '/'.join(os.getcwd().split('/')[:-1])
 base_path = c_path + "/data/"
 server_path = base_path + "/PERCEPTION"
+server_path = '/home/spyros/Desktop/TooDumbToFail/data/PERCEPTION'
 parser.add_argument("--video_dir", type=str, default=os.path.join(server_path, 'avqa-frames-1fps/'))
 parser.add_argument("--image_dir", type=str, default=None)
 parser.add_argument("--image_feat_dir", type=str, default=os.path.join(server_path, 'blip_feats/'))
 parser.add_argument("--question_feat_dir", type=str, default=None)
 parser.add_argument("--answer_feat_dir", type=str, default=None)
-parser.add_argument("--preprocess_batch_size", type=int, default=4)
+parser.add_argument("--preprocess_batch_size", type=int, default=12)
 
 parser.add_argument("--answer_keys", type=str, default=os.path.join(base_path, 'answer_keysword_overlap.json'),
                     help="answer keys")
@@ -54,7 +55,7 @@ parser.add_argument("--mode", type=str, default='train',
 ### ======================== Runtime Configs ==========================
 parser.add_argument('--log-interval', type=int, default=5, metavar='N',
                     help='how many batches to wait before logging training status')
-parser.add_argument('--num_workers', type=int, default=0,
+parser.add_argument('--num_workers', type=int, default=4,
                     help='num_workers number')
 parser.add_argument('--gpu', type=str, default='0',
                     help='gpu device number')

@@ -268,8 +268,7 @@ class PerceptionBLIP_dataset(Dataset):
             self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
             self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco",
                                                                      ).to(device)
-            if device == 'cuda':
-                self.i_feat_extractor = self.i_feat_extractor.half()
+
         elif self.video_dir is not None:
             print("Reading directly from videos")
             from transformers import Blip2Processor, Blip2VisionModel
@@ -277,8 +276,7 @@ class PerceptionBLIP_dataset(Dataset):
             self.i_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
             self.i_feat_extractor = Blip2VisionModel.from_pretrained("Salesforce/blip2-opt-2.7b-coco",
                                                                      ).to(device)
-            if device == 'cuda':
-                self.i_feat_extractor = self.i_feat_extractor.half()
+
         else:
             raise ValueError()
 
@@ -342,12 +340,14 @@ class PerceptionBLIP_dataset(Dataset):
         return final_batch
 
     def read_video(self, path):
+
         if not os.path.isfile(path):
-            raise ValueError('Given path does not lead to a file but a folder!')
+            print('Given path does not lead to a file but a folder!')
+            return None
 
         video_basename, video_extension = os.path.splitext(path)
         image_folder = video_basename
-        video_id = video_basename.split('/')[-1]
+        #video_id = video_basename.split('/')[-1]
         os.makedirs(image_folder, exist_ok=True)
         avr = de.VideoReader(uri=path, ctx=ctx, width=384, height=384,
                              num_threads=0)
@@ -355,10 +355,16 @@ class PerceptionBLIP_dataset(Dataset):
         indices = np.linspace(0, t - 2, 60)
         indices = np.clip(indices, 0, t - 2).astype(int)
         frames = avr.get_batch(indices).asnumpy()
-        for real_index, frame_index in enumerate(indices):
-            frame_filename = f"{video_id}_frame{frame_index}.jpg"
-            frame_path = os.path.join(image_folder, frame_filename)
-            skimage.io.imsave(frame_path, frames[real_index])
+        # for real_index, frame_index in enumerate(indices):
+        #     frame_filename = f"{video_id}_frame{frame_index}.jpg"
+        #     frame_path = os.path.join(image_folder, frame_filename)
+        #     skimage.io.imsave(frame_path, frames[real_index])
+
+        ### Delete the video file ###
+        try:
+            os.remove(path)
+        except:
+            print("Tried to remove file but failed :(")
         return frames
 
     def read_set_of_images(self, path):
@@ -391,10 +397,6 @@ class PerceptionBLIP_dataset(Dataset):
         vision_outputs = torch.stack(vision_outputs, dim=0).cpu()
         with open(path + '.pkl', 'wb') as fout:
             pickle.dump(vision_outputs, fout)
-        ### Clean up ###
-        del tensor_images
-        del out
-        ### End of Clean Up ###
         return vision_outputs
 
     def read_image_feats(self, path):
